@@ -1,0 +1,80 @@
+name: 'METplus Sphinx Linkcheck'
+description: 'Run the Sphinx linkcheck builder against a METplus component docs tree'
+
+inputs:
+  docs-path:
+    description: 'Path to the Sphinx docs directory (containing conf.py)'
+    required: false
+    default: 'docs'
+  requirements-file:
+    description: 'Path to a pip requirements file for building the docs'
+    required: false
+    default: 'docs/requirements.txt'
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.11'
+  fail-on-broken-links:
+    description: 'If "true", the action fails when linkcheck reports broken links'
+    required: false
+    default: 'true'
+  upload-artifact:
+    description: 'If "true", upload the linkcheck output as a workflow artifact'
+    required: false
+    default: 'true'
+  artifact-name:
+    description: 'Name for the uploaded linkcheck artifact'
+    required: false
+    default: 'linkcheck-output'
+
+outputs:
+
+  broken-links-found:
+    description: '"true" if linkcheck reported any broken links'
+    value: ${{ steps.run-linkcheck.outputs.broken_links_found }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install docs dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f "${{ inputs.requirements-file }}" ]; then
+          pip install -r "${{ inputs.requirements-file }}"
+        else
+          pip install sphinx
+        fi
+
+    - name: Run linkcheck
+      id: run-linkcheck
+      shell: bash
+      run: |
+        set +e
+        sphinx-build -b linkcheck "${{ inputs.docs-path }}" "${{ inputs.docs-path }}/_build/linkcheck"
+        status=$?
+        set -e
+
+        if grep -rlq "broken" "${{ inputs.docs-path }}/_build/linkcheck/output.txt" 2>/dev/null; then
+          echo "broken_links_found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "broken_links_found=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ "${{ inputs.fail-on-broken-links }}" = "true" ] && [ "$status" -ne 0 ]; then
+          exit $status
+        fi
+        exit 0
+
+    - name: Upload linkcheck output
+      if: ${{ inputs.upload-artifact == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.docs-path }}/_build/linkcheck/
+
