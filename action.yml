@@ -65,8 +65,10 @@ runs:
       shell: bash
       run: |
         set +e
-        sphinx-build -b linkcheck "${{ inputs.docs-path }}" "${{ inputs.docs-path }}/_build/linkcheck"
+        cd "${{ inputs.docs-path }}"
+        sphinx-build -b linkcheck . _build/linkcheck
         status=$?
+        cd - > /dev/null
         set -e
 
         if grep -rlq "broken" "${{ inputs.docs-path }}/_build/linkcheck/output.txt" 2>/dev/null; then
