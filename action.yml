@@ -13,7 +13,7 @@ inputs:
   python-version:
     description: 'Python version to use'
     required: false
-    default: '3.11'
+    default: '3.12'
   install-package:
     description: 'If "true", pip install the repository itself (editable) before building docs. Needed for repos whose conf.py imports the package directly (e.g. to read __version__).'
     required: false
