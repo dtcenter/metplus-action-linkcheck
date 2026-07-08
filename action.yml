@@ -83,7 +83,7 @@ runs:
         exit 0
 
     - name: Upload linkcheck output
-      if: ${{ always() && ${{ inputs.upload-artifact == 'true' }}
+      if: ${{ always() && inputs.upload-artifact == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
