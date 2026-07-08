@@ -32,7 +32,6 @@ inputs:
     default: 'linkcheck-output'
 
 outputs:
-
   broken-links-found:
     description: '"true" if linkcheck reported any broken links'
     value: ${{ steps.run-linkcheck.outputs.broken_links_found }}
@@ -68,10 +67,20 @@ runs:
         cd "${{ inputs.docs-path }}"
         sphinx-build -b linkcheck . _build/linkcheck
         status=$?
+        
+        # Rename output files to linkcheck-output files if they exist
+        if [ -f "_build/linkcheck/output.txt" ]; then
+          mv _build/linkcheck/output.txt _build/linkcheck/linkcheck-output.txt
+        fi
+        if [ -f "_build/linkcheck/output.json" ]; then
+          mv _build/linkcheck/output.json _build/linkcheck/linkcheck-output.json
+        fi
+        
         cd - > /dev/null
         set -e
 
-        if grep -rlq "broken" "${{ inputs.docs-path }}/_build/linkcheck/output.txt" 2>/dev/null; then
+        # Check for broken links in the renamed file
+        if grep -rlq "broken" "${{ inputs.docs-path }}/_build/linkcheck/linkcheck-output.txt" 2>/dev/null; then
           echo "broken_links_found=true" >> "$GITHUB_OUTPUT"
         else
           echo "broken_links_found=false" >> "$GITHUB_OUTPUT"
@@ -87,4 +96,6 @@ runs:
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ inputs.docs-path }}/_build/linkcheck/
+        path: |
+          ${{ inputs.docs-path }}/_build/linkcheck/linkcheck-output.txt
+          ${{ inputs.docs-path }}/_build/linkcheck/linkcheck-output.json
