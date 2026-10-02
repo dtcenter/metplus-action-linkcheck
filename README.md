@@ -11,11 +11,15 @@ failure thresholds.
 ## Version History
 
 ### v1.6.0
-* **2026-10-01**
+* **2026-10-02**
 * Re-check transient link failures before failing (#1)
 * Report broken links as annotations and in the job summary
 * Detect broken links from linkcheck-output.json
 * Cache pip downloads; document Python 3.12 limit
+* Check relative links against the documents in the Sphinx build (#3)
+* Show the Read the Docs URL of broken relative links for the current branch
+* Re-check and report links that time out
+* List ignored links in a collapsed table in the job summary
 
 ### v1
 * **2026-07-08**
@@ -31,7 +35,8 @@ This composite action:
 * Optionally installs the current repository package in editable mode if required by Sphinx's `conf.py`.
 * Runs the Sphinx `linkcheck` builder against the specified documentation source tree.
 * Classifies broken links as permanent or transient, re-checking transient failures after a delay (see [Broken Link Handling](#broken-link-handling)).
-* Reports each broken link as an annotation on the file and line where it appears, and writes a results table to the job summary.
+* Checks relative links against the documents in the Sphinx build (see [Relative Links](#relative-links)).
+* Reports each broken link as an annotation on the file and line where it appears, and writes a results table to the job summary, along with a collapsed table of ignored links.
 * Exposes whether any links are still broken as an action output.
 * Optionally fails the build when broken links are found.
 * Optionally uploads the detailed linkcheck output text files as a workflow artifact.
@@ -50,6 +55,7 @@ This composite action:
 | **recheck-attempts** | Number of times to re-check links that fail with a transient error. Use `0` to disable re-checks. | No | `2` |
 | **recheck-delay** | Seconds to wait before the first re-check. The wait doubles before each additional re-check. | No | `15` |
 | **fail-on-transient** | If `"true"`, links that still fail with a transient error after all re-checks are reported as errors. If `"false"`, they are reported as warnings instead. | No | `true` |
+| **rtd-url** | Read the Docs URL with a `{version}` placeholder, e.g. `https://metplus.readthedocs.io/en/{version}/`. If set, broken relative links are reported with their Read the Docs URL for the current branch (see [Relative Links](#relative-links)). | No | `''` |
 | **upload-artifact** | If `"true"`, upload the linkcheck output as a workflow artifact. | No | `true` |
 | **artifact-name** | Name for the uploaded linkcheck artifact. | No | `linkcheck-output` |
 
@@ -63,12 +69,12 @@ This composite action:
 
 ## Broken Link Handling
 
-Sphinx `linkcheck` reports every failure as `broken`, and its `linkcheck_retries` setting retries immediately with no delay. To avoid failing jobs on short network outages, this action reads `linkcheck-output.json` and classifies each broken link:
+Sphinx `linkcheck` reports most failures as `broken` (Sphinx 8.x reports timeouts as `timeout`), and its `linkcheck_retries` setting retries immediately with no delay. To avoid failing jobs on short network outages, this action reads `linkcheck-output.json` and classifies each broken link:
 
 | Category | Errors | Result |
 | :--- | :--- | :--- |
 | **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, TLS/SSL certificate errors | Reported as an error |
-| **Transient** | Connection errors, timeouts, HTTP 429, HTTP 5xx, temporary DNS failures, and any other error | Re-checked |
+| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx, temporary DNS failures, and any other error | Re-checked |
 
 Transient failures are re-checked up to `recheck-attempts` times, waiting `recheck-delay` seconds before the first re-check and doubling the wait each time (15s, then 30s by default). Re-checks request the URL without its anchor, using the same User-Agent as Sphinx.
 
@@ -79,6 +85,23 @@ Transient failures are re-checked up to `recheck-attempts` times, waiting `reche
 The job fails only when errors are reported and `fail-on-broken-links` is `"true"`. The job also fails if `sphinx-build` itself fails for reasons other than broken links.
 
 Each error and warning is shown as an annotation on the file and line containing the link, and all results are listed in the job summary.
+
+Links that Sphinx does not check (those matching `linkcheck_ignore`, and in Sphinx 8.x, those returning `503 Service Unavailable`) are listed with clickable URLs in a collapsed **Ignored Links** table in the job summary, so they can be checked by hand. They do not affect the job result.
+
+---
+
+## Relative Links
+
+Relative links such as `` `Use Case <../generated/met_tool_wrapper/StatAnalysis/StatAnalysis.html>`_ `` keep readers on the version of the docs they are viewing on Read the Docs. Sphinx `linkcheck` checks them against the **source** tree, where `.html` files never exist, so it reports them as broken.
+
+Instead, this action checks them against the documents read by the Sphinx build, including pages generated by extensions such as sphinx-gallery. The list of documents is read from `_build/linkcheck/.doctrees/environment.pickle`, or found by searching `docs-path` for source files if that cannot be loaded.
+
+* The link is resolved against the directory of the document containing it, ignoring any query string or anchor.
+* A link to `X.html` (or `X/`, meaning `X/index.html`) passes if `X` is a document in the build. Links to `search.html`, `genindex.html`, and `py-modindex.html` always pass, since the HTML builder creates them.
+* Any other broken relative link (e.g. a missing `../_static/example.pdf`) is reported as an error. Relative links are never re-checked over the network.
+* Anchors on relative links are not checked.
+
+If `rtd-url` is set, each broken relative link is also shown with its Read the Docs URL for the branch being built. `{version}` is replaced with the branch name (`GITHUB_HEAD_REF` for pull requests, otherwise `GITHUB_REF_NAME`), converted the way Read the Docs names versions: lowercase, with characters other than `a-z`, `0-9`, `.`, `_`, and `-` replaced by `-`. This URL is shown for convenience and is not requested, so it may not exist yet if Read the Docs has not finished building the branch.
 
 ---
 
@@ -91,4 +114,15 @@ This example shows the minimum configuration, assuming your documentation is in 
 ```yaml
 - name: Check Documentation Links
   uses: dtcenter/metplus-action-linkcheck@v1
+```
 
+### Read the Docs URLs for Relative Links
+
+This example shows broken relative links with their Read the Docs URL for the current branch:
+
+```yaml
+- name: Check Documentation Links
+  uses: dtcenter/metplus-action-linkcheck@v1
+  with:
+    rtd-url: 'https://metplus.readthedocs.io/en/{version}/'
+```
