@@ -19,6 +19,7 @@ failure thresholds.
 * Check relative links against the documents in the Sphinx build (#3)
 * Show the Read the Docs URL of broken relative links for the current branch
 * Re-check and report links that time out
+* Report malformed URLs as errors without re-checking them
 * List failing, warning, and ignored links in collapsed tables in the job summary
 
 ### v1
