@@ -4,8 +4,11 @@ Process the JSON output of the Sphinx linkcheck builder.
 
 Broken links are classified as permanent (e.g. 404, missing anchor, unknown
 host) or transient (e.g. connection errors, timeouts, 429, 5xx). Transient
-failures are re-checked after an increasing delay. Results are reported as
-GitHub Actions annotations and as a Markdown table in the job summary.
+failures are re-checked after an increasing delay. Relative links are checked
+against the documents read by the Sphinx build instead of over the network.
+Results are listed in the log and as Markdown tables in the job summary,
+including a collapsed table of ignored links. If any links fail, a single
+GitHub Actions annotation reports how many.
 
 Exit status is 1 if any link should fail the job, otherwise 0.
 """
@@ -13,9 +16,12 @@ Exit status is 1 if any link should fail the job, otherwise 0.
 import argparse
 import json
 import os
+import pickle
+import posixpath
 import re
 import sys
 import time
+from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
@@ -36,6 +42,19 @@ SSL_ERRORS = (
     'sslerror',
     'certificate verify failed',
 )
+
+URL_ERRORS = (
+    'invalid url',
+    'no host supplied',
+    'invalid schema',
+    'no connection adapters',
+)
+
+# pages written by the HTML builder that have no source document
+BUILDER_PAGES = ('search', 'genindex', 'py-modindex')
+
+# source suffixes to look for if the Sphinx environment cannot be loaded
+SOURCE_SUFFIXES = ('.rst', '.md', '.ipynb', '.txt')
 
 
 def get_user_agent():
@@ -77,6 +96,8 @@ def classify(code, info):
         return PERMANENT
     if any(err in lower for err in SSL_ERRORS):
         return PERMANENT
+    if any(err in lower for err in URL_ERRORS):
+        return PERMANENT
     if 'temporary failure in name resolution' in lower:
         return TRANSIENT
     if any(err in lower for err in DNS_ERRORS):
@@ -84,6 +105,93 @@ def classify(code, info):
 
     # connection errors, timeouts, and anything unrecognized
     return TRANSIENT
+
+
+def get_malformed_reason(uri):
+    """Return why an http(s) URL is malformed, or None if it is not."""
+    try:
+        parts = urlsplit(uri)
+        host = parts.hostname
+    except ValueError as err:
+        return f'malformed URL: {err}'
+    if parts.scheme not in ('http', 'https'):
+        return None
+    if not host:
+        return 'malformed URL: no host name'
+    if host in ('http', 'https'):
+        return (f"malformed URL: host name is '{host}' "
+                f"(is the scheme repeated?)")
+    return None
+
+
+def is_relative(uri):
+    """Return True for a link to a local path rather than a URL or anchor."""
+    return (not uri.startswith('#') and not urlsplit(uri).scheme
+            and not uri.startswith('//'))
+
+
+def load_docnames(doctree_dir, docs_path):
+    """Return the names of all documents read by the Sphinx build."""
+    try:
+        with open(os.path.join(doctree_dir, 'environment.pickle'),
+                  'rb') as file_handle:
+            return set(pickle.load(file_handle).found_docs)
+    except Exception as err:
+        print(f'Could not load the Sphinx environment ({err}), '
+              f'searching {docs_path} for source files instead')
+
+    docnames = set()
+    for root, dirs, files in os.walk(docs_path):
+        dirs[:] = [d for d in dirs if not d.startswith(('_build', '.'))]
+        for name in files:
+            stem, ext = os.path.splitext(name)
+            if ext in SOURCE_SUFFIXES:
+                rel = os.path.relpath(os.path.join(root, stem), docs_path)
+                docnames.add(rel.replace(os.sep, '/'))
+    return docnames
+
+
+def check_relative(filename, uri, docnames):
+    """Check a relative link against the documents in the build.
+
+    Return (ok, info) where info describes why the link is broken.
+    """
+    path = unquote(urlsplit(uri).path)
+    if not path:
+        # only a query string, which refers to the current page
+        return True, ''
+    if path.startswith('/'):
+        target = posixpath.normpath(path.lstrip('/'))
+    else:
+        target = posixpath.normpath(
+            posixpath.join(posixpath.dirname(filename), path))
+    if target == '..' or target.startswith('../'):
+        return False, f'path {target} is outside of the docs directory'
+
+    if not path.endswith('.html') and not path.endswith('/'):
+        # Sphinx already checked other files against the source tree
+        return False, f'file {target} not found in the docs directory'
+
+    docname = target[:-len('.html')] if path.endswith('.html') else (
+        posixpath.join(target, 'index') if target != '.' else 'index')
+    if docname in docnames or docname in BUILDER_PAGES:
+        return True, ''
+    return False, f'no document {docname} in the docs build'
+
+
+def get_rtd_base(rtd_url, branch):
+    """Return the Read the Docs URL for the branch, or None if not set."""
+    if not rtd_url:
+        return None
+    version = re.sub(r'[^a-z0-9._-]', '-', (branch or '').lower())
+    base = rtd_url.replace('{version}', version)
+    return base if base.endswith('/') else base + '/'
+
+
+def get_rtd_link(rtd_base, filename, uri):
+    """Resolve a relative link against the Read the Docs page containing it."""
+    page = posixpath.splitext(filename)[0] + '.html'
+    return urljoin(urljoin(rtd_base, page), uri)
 
 
 def check_url(uri, timeout, user_agent):
@@ -147,37 +255,66 @@ def escape_data(value):
     return value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
 
 
-def escape_property(value):
-    return escape_data(value).replace(':', '%3A').replace(',', '%2C')
+def report(level, link, message):
+    """Print one link result to the log."""
+    print(f'{level}: {link["path"]}:{link["lineno"]}: {message}')
 
 
-def annotate(level, link, message):
-    print(f'::{level} file={escape_property(link["path"])},'
-          f'line={link["lineno"]},title=Linkcheck::{escape_data(message)}')
+def annotate(level, message):
+    print(f'::{level} title=Linkcheck::{escape_data(message)}')
 
 
 def escape_cell(value):
     return value.replace('|', '\\|').replace('\n', ' ')
 
 
-def write_summary(path, failing, warnings, total):
+def markdown_link(url):
+    """Format a URL as a clickable Markdown link for a table cell."""
+    text = url.replace('[', '\\[').replace(']', '\\]')
+    return escape_cell(f'[{text}](<{url}>)')
+
+
+def uri_cell(link):
+    """Format the URI cell, adding the Read the Docs URL if there is one."""
+    if link.get('rtd_link'):
+        return (f'{escape_cell(link["uri"])}<br>'
+                f'{markdown_link(link["rtd_link"])}')
+    return escape_cell(link['uri'])
+
+
+def collapsed_table(title, header, rows):
+    """Return the lines of a Markdown table in a collapsed section."""
+    return (['', '<details>', f'<summary>{title} ({len(rows)})</summary>', '',
+             '| ' + ' | '.join(header) + ' |',
+             '| ' + ' | '.join(':---' for _ in header) + ' |']
+            + rows + ['', '</details>'])
+
+
+def write_summary(path, failing, warnings, ignored, total):
     lines = ['## Linkcheck Results', '']
     if not failing and not warnings:
-        lines.append(f'All {total} checked links passed.')
+        summary = f'All {total} checked links passed'
     else:
-        lines.append(f'Checked {total} links: **{len(failing)} failing**, '
-                     f'{len(warnings)} warning(s).')
+        summary = (f'Checked {total} links: **{len(failing)} failing**, '
+                   f'{len(warnings)} warning(s)')
+    if ignored:
+        summary += f', {len(ignored)} ignored'
+    lines.append(summary + '.')
     for title, links in (('Failing Links', failing), ('Warnings', warnings)):
         if not links:
             continue
-        lines += ['', f'### {title}', '',
-                  '| Location | URI | Result | Details |',
-                  '| :--- | :--- | :--- | :--- |']
-        for link in links:
-            lines.append(f'| {escape_cell(link["path"])}:{link["lineno"]} '
-                         f'| {escape_cell(link["uri"])} '
-                         f'| {link["result"]} '
-                         f'| {escape_cell(link["info"])} |')
+        rows = [f'| {escape_cell(link["path"])}:{link["lineno"]} '
+                f'| {uri_cell(link)} '
+                f'| {link["result"]} '
+                f'| {escape_cell(link["info"])} |' for link in links]
+        lines += collapsed_table(title, ('Location', 'URI', 'Result',
+                                         'Details'), rows)
+    if ignored:
+        rows = [f'| {escape_cell(link["path"])}:{link["lineno"]} '
+                f'| {markdown_link(link["uri"])} '
+                f'| {escape_cell(link["info"])} |' for link in ignored]
+        lines += collapsed_table('Ignored Links',
+                                 ('Location', 'URI', 'Reason'), rows)
     with open(path, 'a') as file_handle:
         file_handle.write('\n'.join(lines) + '\n')
 
@@ -196,36 +333,83 @@ def main():
     parser.add_argument('output_json',
                         help='path to the linkcheck output.json file')
     parser.add_argument('--docs-path', default='docs',
-                        help='docs directory, used to build annotation paths')
+                        help='docs directory, used to build file paths')
     parser.add_argument('--recheck-attempts', type=int, default=2)
     parser.add_argument('--recheck-delay', type=int, default=15)
     parser.add_argument('--timeout', type=int, default=30)
     parser.add_argument('--fail-on-transient', default='true')
+    parser.add_argument('--fail-on-broken-links', default='true',
+                        help='if "true", report failing links as an error '
+                             'annotation, otherwise as a warning')
+    parser.add_argument('--doctree-dir',
+                        help='Sphinx doctree directory containing '
+                             'environment.pickle (default: .doctrees next '
+                             'to output_json)')
+    parser.add_argument('--rtd-url', default='',
+                        help='Read the Docs URL with a {version} placeholder, '
+                             'used to show where broken relative links point')
+    parser.add_argument('--branch', default='',
+                        help='branch being built, used for {version}')
     args = parser.parse_args()
 
     fail_on_transient = args.fail_on_transient.lower() == 'true'
+    fail_on_broken = args.fail_on_broken_links.lower() == 'true'
+    doctree_dir = args.doctree_dir or os.path.join(
+        os.path.dirname(args.output_json), '.doctrees')
+    rtd_base = get_rtd_base(args.rtd_url, args.branch)
 
     with open(args.output_json) as file_handle:
         entries = [json.loads(line) for line in file_handle if line.strip()]
 
     links = []
+    ignored = []
+    docnames = None
+    relative_ok = 0
     for entry in entries:
-        if entry.get('status') != 'broken':
-            continue
-        links.append({
+        status = entry.get('status')
+        link = {
             'path': os.path.normpath(os.path.join(args.docs_path,
                                                   entry['filename'])),
             'lineno': entry.get('lineno') or 1,
             'uri': entry['uri'],
-            'info': entry.get('info', ''),
-            'category': classify(entry.get('code'), entry.get('info')),
+            'info': entry.get('info') or '',
             'result': 'broken',
             'attempts': 0,
-        })
+        }
+        if status == 'ignored':
+            link['info'] = link['info'] or 'matches linkcheck_ignore'
+            ignored.append(link)
+            continue
+        if status not in ('broken', 'timeout'):
+            continue
+
+        if is_relative(entry['uri']):
+            if docnames is None:
+                docnames = load_docnames(doctree_dir, args.docs_path)
+            ok, info = check_relative(entry['filename'], entry['uri'],
+                                      docnames)
+            if ok:
+                relative_ok += 1
+                continue
+            link['info'] = info
+            link['category'] = PERMANENT
+            if rtd_base:
+                link['rtd_link'] = get_rtd_link(rtd_base, entry['filename'],
+                                                entry['uri'])
+        elif get_malformed_reason(entry['uri']):
+            link['info'] = get_malformed_reason(entry['uri'])
+            link['category'] = PERMANENT
+        elif status == 'timeout':
+            link['category'] = TRANSIENT
+        else:
+            link['category'] = classify(entry.get('code'), entry.get('info'))
+        links.append(link)
 
     total = sum(1 for entry in entries
                 if entry.get('status') not in ('unchecked', 'ignored', 'local'))
     transient = [link for link in links if link['category'] == TRANSIENT]
+    if relative_ok:
+        print(f'Found {relative_ok} relative link(s) in the docs build')
     print(f'Linkcheck reported {len(links)} broken link(s): '
           f'{len(links) - len(transient)} permanent, '
           f'{len(transient)} transient')
@@ -241,28 +425,34 @@ def main():
     warnings = []
     for link in links:
         if link['result'] == 'recovered':
-            annotate('warning', link,
+            report('warning', link,
                      f'Link {link["uri"]} failed linkcheck but recovered '
                      f'after {link["attempts"]} re-check(s)')
             warnings.append(link)
         elif link['result'] == 'unreachable' and not fail_on_transient:
-            annotate('warning', link,
+            report('warning', link,
                      f'Link {link["uri"]} is still unreachable after '
                      f'{link["attempts"]} re-check(s): {link["info"]}')
             warnings.append(link)
         else:
-            annotate('error', link,
-                     f'Broken link {link["uri"]}: {link["info"]}')
+            message = f'Broken link {link["uri"]}: {link["info"]}'
+            if link.get('rtd_link'):
+                message += f' (Read the Docs: {link["rtd_link"]})'
+            report('error', link, message)
             failing.append(link)
 
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary_file:
-        write_summary(summary_file, failing, warnings, total)
+        write_summary(summary_file, failing, warnings, ignored, total)
 
     still_broken = [link for link in links if link['result'] != 'recovered']
     set_output('broken_links_found', 'true' if still_broken else 'false')
 
     print(f'Result: {len(failing)} failing, {len(warnings)} warning(s)')
+    if failing:
+        annotate('error' if fail_on_broken else 'warning',
+                 f'{len(failing)} of {total} links failed. '
+                 f'See the job summary for details.')
     return 1 if failing else 0
 
 

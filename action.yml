@@ -34,6 +34,10 @@ inputs:
     description: 'If "true", links that still fail with a transient error after all re-checks are reported as errors. If "false", they are reported as warnings instead.'
     required: false
     default: 'true'
+  rtd-url:
+    description: 'Read the Docs URL with a {version} placeholder (e.g. https://metplus.readthedocs.io/en/{version}/). If set, broken relative links are reported with their Read the Docs URL for the current branch. The URL is shown, not checked.'
+    required: false
+    default: ''
   upload-artifact:
     description: 'If "true", upload the linkcheck output as a workflow artifact'
     required: false
@@ -102,6 +106,7 @@ runs:
         RECHECK_ATTEMPTS: ${{ inputs.recheck-attempts }}
         RECHECK_DELAY: ${{ inputs.recheck-delay }}
         FAIL_ON_TRANSIENT: ${{ inputs.fail-on-transient }}
+        RTD_URL: ${{ inputs.rtd-url }}
       run: |
         set +e
         cd "$DOCS_PATH"
@@ -134,7 +139,10 @@ runs:
           --docs-path "$DOCS_PATH" \
           --recheck-attempts "$RECHECK_ATTEMPTS" \
           --recheck-delay "$RECHECK_DELAY" \
-          --fail-on-transient "$FAIL_ON_TRANSIENT"
+          --fail-on-transient "$FAIL_ON_TRANSIENT" \
+          --fail-on-broken-links "$FAIL_ON_BROKEN_LINKS" \
+          --rtd-url "$RTD_URL" \
+          --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
         result=$?
 
         if [ "$FAIL_ON_BROKEN_LINKS" = "true" ] && [ "$result" -ne 0 ]; then
