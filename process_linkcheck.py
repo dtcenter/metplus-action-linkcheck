@@ -200,7 +200,7 @@ def main():
     parser.add_argument('--recheck-attempts', type=int, default=2)
     parser.add_argument('--recheck-delay', type=int, default=15)
     parser.add_argument('--timeout', type=int, default=30)
-    parser.add_argument('--fail-on-transient', default='false')
+    parser.add_argument('--fail-on-transient', default='true')
     args = parser.parse_args()
 
     fail_on_transient = args.fail_on_transient.lower() == 'true'

@@ -31,9 +31,9 @@ inputs:
     required: false
     default: '15'
   fail-on-transient:
-    description: 'If "true", links that still fail with a transient error after all re-checks are reported as errors. Otherwise they are reported as warnings.'
+    description: 'If "true", links that still fail with a transient error after all re-checks are reported as errors. If "false", they are reported as warnings instead.'
     required: false
-    default: 'false'
+    default: 'true'
   upload-artifact:
     description: 'If "true", upload the linkcheck output as a workflow artifact'
     required: false

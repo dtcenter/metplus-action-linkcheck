@@ -42,7 +42,7 @@ This composite action:
 | **fail-on-broken-links** | If `"true"`, the action fails when linkcheck reports broken links. | No | `true` |
 | **recheck-attempts** | Number of times to re-check links that fail with a transient error. Use `0` to disable re-checks. | No | `2` |
 | **recheck-delay** | Seconds to wait before the first re-check. The wait doubles before each additional re-check. | No | `15` |
-| **fail-on-transient** | If `"true"`, links that still fail with a transient error after all re-checks are reported as errors. Otherwise they are reported as warnings. | No | `false` |
+| **fail-on-transient** | If `"true"`, links that still fail with a transient error after all re-checks are reported as errors. If `"false"`, they are reported as warnings instead. | No | `true` |
 | **upload-artifact** | If `"true"`, upload the linkcheck output as a workflow artifact. | No | `true` |
 | **artifact-name** | Name for the uploaded linkcheck artifact. | No | `linkcheck-output` |
 
@@ -50,7 +50,7 @@ This composite action:
 
 | Output | Description |
 | :--- | :--- |
-| **broken-links-found** | `"true"` if any links are still broken after re-checks (including transient failures reported as warnings), otherwise `"false"`. |
+| **broken-links-found** | `"true"` if any links are still broken after re-checks (including transient failures reported as warnings when `fail-on-transient` is `"false"`), otherwise `"false"`. |
 
 ---
 
@@ -66,7 +66,7 @@ Sphinx `linkcheck` reports every failure as `broken`, and its `linkcheck_retries
 Transient failures are re-checked up to `recheck-attempts` times, waiting `recheck-delay` seconds before the first re-check and doubling the wait each time (15s, then 30s by default). Re-checks request the URL without its anchor, using the same User-Agent as Sphinx.
 
 * Links that **recover** are reported as warnings.
-* Links that are **still unreachable** are reported as warnings, or as errors if `fail-on-transient` is `"true"`.
+* Links that are **still unreachable** after all re-checks are reported as errors, or as warnings if `fail-on-transient` is `"false"`.
 * A link that returns a permanent error during a re-check (e.g. 404) is reported as an error.
 
 The job fails only when errors are reported and `fail-on-broken-links` is `"true"`. The job also fails if `sphinx-build` itself fails for reasons other than broken links.
