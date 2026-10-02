@@ -10,6 +10,13 @@ failure thresholds.
 
 ## Version History
 
+### v2
+* **2026-10-01**
+* Re-check transient link failures before failing (#1)
+* Report broken links as annotations and in the job summary
+* Detect broken links from linkcheck-output.json
+* Cache pip downloads; document Python 3.12 limit
+
 ### v1
 * **2026-07-08**
 * Initial version
@@ -83,5 +90,5 @@ This example shows the minimum configuration, assuming your documentation is in 
 
 ```yaml
 - name: Check Documentation Links
-  uses: dtcenter/metplus-action-linkcheck@v1
+  uses: dtcenter/metplus-action-linkcheck@v2
 
