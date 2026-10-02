@@ -43,6 +43,13 @@ SSL_ERRORS = (
     'certificate verify failed',
 )
 
+URL_ERRORS = (
+    'invalid url',
+    'no host supplied',
+    'invalid schema',
+    'no connection adapters',
+)
+
 # pages written by the HTML builder that have no source document
 BUILDER_PAGES = ('search', 'genindex', 'py-modindex')
 
@@ -89,6 +96,8 @@ def classify(code, info):
         return PERMANENT
     if any(err in lower for err in SSL_ERRORS):
         return PERMANENT
+    if any(err in lower for err in URL_ERRORS):
+        return PERMANENT
     if 'temporary failure in name resolution' in lower:
         return TRANSIENT
     if any(err in lower for err in DNS_ERRORS):
@@ -96,6 +105,23 @@ def classify(code, info):
 
     # connection errors, timeouts, and anything unrecognized
     return TRANSIENT
+
+
+def get_malformed_reason(uri):
+    """Return why an http(s) URL is malformed, or None if it is not."""
+    try:
+        parts = urlsplit(uri)
+        host = parts.hostname
+    except ValueError as err:
+        return f'malformed URL: {err}'
+    if parts.scheme not in ('http', 'https'):
+        return None
+    if not host:
+        return 'malformed URL: no host name'
+    if host in ('http', 'https'):
+        return (f"malformed URL: host name is '{host}' "
+                f"(is the scheme repeated?)")
+    return None
 
 
 def is_relative(uri):
@@ -368,6 +394,9 @@ def main():
             if rtd_base:
                 link['rtd_link'] = get_rtd_link(rtd_base, entry['filename'],
                                                 entry['uri'])
+        elif get_malformed_reason(entry['uri']):
+            link['info'] = get_malformed_reason(entry['uri'])
+            link['category'] = PERMANENT
         elif status == 'timeout':
             link['category'] = TRANSIENT
         else:

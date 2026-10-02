@@ -73,7 +73,7 @@ Sphinx `linkcheck` reports most failures as `broken` (Sphinx 8.x reports timeout
 
 | Category | Errors | Result |
 | :--- | :--- | :--- |
-| **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, TLS/SSL certificate errors | Reported as an error |
+| **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, TLS/SSL certificate errors, malformed URLs (e.g. `https://` with no host, or a repeated scheme such as `https://https://...`) | Reported as an error |
 | **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx, temporary DNS failures, and any other error | Re-checked |
 
 Transient failures are re-checked up to `recheck-attempts` times, waiting `recheck-delay` seconds before the first re-check and doubling the wait each time (15s, then 30s by default). Re-checks request the URL without its anchor, using the same User-Agent as Sphinx.
