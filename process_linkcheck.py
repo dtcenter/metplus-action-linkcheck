@@ -3,7 +3,9 @@
 Process the JSON output of the Sphinx linkcheck builder.
 
 Broken links are classified as permanent (e.g. 404, missing anchor, unknown
-host) or transient (e.g. connection errors, timeouts, 429, 5xx). Transient
+host) or transient (e.g. connection errors, timeouts, 429, 5xx, including 503
+responses that Sphinx reports as ignored). GitHub file links that github.com
+throttles with 503 or 429 are checked on raw.githubusercontent.com. Transient
 failures are re-checked after an increasing delay. Relative links are checked
 against the documents read by the Sphinx build instead of over the network.
 DOI links, including ignored ones, are checked with the DOI API.
@@ -50,6 +52,10 @@ URL_ERRORS = (
     'invalid schema',
     'no connection adapters',
 )
+
+# github.com file pages, which GitHub throttles with 503 or 429 responses
+GITHUB_BLOB_RE = re.compile(r'^https://github\.com/([^/]+)/([^/]+)/blob/([^?#]+)')
+GITHUB_THROTTLED = (429, 503)
 
 DOI_HOSTS = ('doi.org', 'dx.doi.org', 'www.doi.org')
 DOI_API = 'https://doi.org/api/handles/'
@@ -157,6 +163,38 @@ def check_doi(doi, timeout, user_agent):
     code = response.status_code if response.status_code >= 500 else 0
     return (False, code, f'DOI lookup returned HTTP {response.status_code} '
                          f'with responseCode {response_code}')
+
+
+def is_service_unavailable(status, info):
+    """Return True for a link Sphinx ignored because it returned HTTP 503.
+
+    Sphinx 8 reports these with info "service unavailable" and Sphinx 5 with
+    "503 Server Error: ...". Other ignored links (matching linkcheck_ignore,
+    ignored redirects, excluded documents) are not affected.
+    """
+    if status != 'ignored':
+        return False
+    lower = (info or '').lower()
+    return lower == 'service unavailable' or get_http_code(0, info) == 503
+
+
+def get_github_raw(uri):
+    """Return the raw.githubusercontent.com URL for a github.com file link."""
+    match = GITHUB_BLOB_RE.match(uri)
+    if not match:
+        return None
+    owner, repo, ref_and_path = match.groups()
+    return f'https://raw.githubusercontent.com/{owner}/{repo}/{ref_and_path}'
+
+
+def check_github_raw(raw_url, timeout, user_agent):
+    """Check a GitHub file on raw.githubusercontent.com. Return (ok, code, info)."""
+    ok, code, info = check_url(raw_url, timeout, user_agent)
+    if ok:
+        return ok, code, info
+    if code == 404:
+        return False, 404, f'file not found on raw.githubusercontent.com: {raw_url}'
+    return False, code, f'raw.githubusercontent.com: {info}'
 
 
 def classify_doi(code):
@@ -274,6 +312,9 @@ def recheck(links, attempts, delay, timeout):
         for link in pending:
             if link.get('doi'):
                 ok, code, info = check_doi(link['doi'], timeout, user_agent)
+            elif link.get('github_raw'):
+                ok, code, info = check_github_raw(link['github_raw'], timeout,
+                                                  user_agent)
             else:
                 ok, code, info = check_url(link['uri'], timeout, user_agent)
             link['attempts'] = attempt
@@ -335,7 +376,8 @@ def collapsed_table(title, header, rows):
             + rows + ['', '</details>'])
 
 
-def write_summary(path, failing, warnings, ignored, total, doi_count):
+def write_summary(path, failing, warnings, ignored, total, doi_count,
+                  github_count):
     lines = ['## Linkcheck Results', '']
     if not failing and not warnings:
         summary = f'All {total} checked links passed'
@@ -348,6 +390,10 @@ def write_summary(path, failing, warnings, ignored, total, doi_count):
     if doi_count:
         lines += ['', f'{doi_count} DOI link(s) were checked with the DOI API '
                       f'(`{DOI_API}`) instead of the publisher\'s site.']
+    if github_count:
+        lines += ['', f'{github_count} GitHub file link(s) were checked on '
+                      f'`raw.githubusercontent.com` because `github.com` '
+                      f'returned 503 or 429.']
     for title, links in (('Failing Links', failing), ('Warnings', warnings)):
         if not links:
             continue
@@ -421,6 +467,10 @@ def main():
     doi_results = {}
     doi_count = 0
     doi_ignored = 0
+    unavailable = 0
+    github_results = {}
+    github_count = 0
+    github_ignored = 0
     for entry in entries:
         status = entry.get('status')
         link = {
@@ -450,6 +500,35 @@ def main():
             links.append(link)
             continue
 
+        raw_url = get_github_raw(entry['uri'])
+        throttled = is_service_unavailable(status, link['info']) or (
+            status in ('broken', 'timeout') and
+            get_http_code(entry.get('code'), link['info']) in GITHUB_THROTTLED)
+        if raw_url and throttled:
+            # github.com throttles file pages, so check the raw file instead
+            if raw_url not in github_results:
+                github_results[raw_url] = check_github_raw(raw_url, args.timeout,
+                                                           user_agent)
+            ok, code, info = github_results[raw_url]
+            github_count += 1
+            if status == 'ignored':
+                github_ignored += 1
+            if ok:
+                continue
+            link['github_raw'] = raw_url
+            link['info'] = info
+            link['category'] = PERMANENT if code == 404 else TRANSIENT
+            links.append(link)
+            continue
+
+        if is_service_unavailable(status, link['info']):
+            # Sphinx ignores 503 responses, but they are transient failures
+            unavailable += 1
+            if link['info'].lower() == 'service unavailable':
+                link['info'] = '503 Service Unavailable'
+            link['category'] = TRANSIENT
+            links.append(link)
+            continue
         if status == 'ignored':
             link['info'] = link['info'] or 'matches linkcheck_ignore'
             ignored.append(link)
@@ -479,12 +558,20 @@ def main():
             link['category'] = classify(entry.get('code'), entry.get('info'))
         links.append(link)
 
-    total = doi_ignored + sum(
+    total = doi_ignored + unavailable + github_ignored + sum(
         1 for entry in entries
         if entry.get('status') not in ('unchecked', 'ignored', 'local'))
     transient = [link for link in links if link['category'] == TRANSIENT]
     if relative_ok:
         print(f'Found {relative_ok} relative link(s) in the docs build')
+    if unavailable:
+        print(f'Sphinx ignored {unavailable} link(s) that returned '
+              f'503 Service Unavailable; re-checking them as transient')
+    if github_count:
+        found = sum(1 for result in github_results.values() if result[0])
+        print(f'Checked {github_count} GitHub file link(s) on '
+              f'raw.githubusercontent.com because github.com returned 503 '
+              f'or 429: {found} of {len(github_results)} unique file(s) found')
     if doi_count:
         found = sum(1 for result in doi_results.values() if result[0])
         print(f'Checked {doi_count} DOI link(s) with the DOI API: '
@@ -523,7 +610,7 @@ def main():
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary_file:
         write_summary(summary_file, failing, warnings, ignored, total,
-                      doi_count)
+                      doi_count, github_count)
 
     still_broken = [link for link in links if link['result'] != 'recovered']
     set_output('broken_links_found', 'true' if still_broken else 'false')

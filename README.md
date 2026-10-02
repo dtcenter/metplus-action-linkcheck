@@ -22,6 +22,8 @@ failure thresholds.
 * Report malformed URLs as errors without re-checking them
 * List failing, warning, and ignored links in collapsed tables in the job summary
 * Check DOI links with the DOI API, including links ignored by `linkcheck_ignore`
+* Re-check links that return `503`, which Sphinx reports as ignored (#6)
+* Check GitHub file links that `github.com` throttles on `raw.githubusercontent.com`
 
 ### v1
 * **2026-07-08**
@@ -39,6 +41,7 @@ This composite action:
 * Classifies broken links as permanent or transient, re-checking transient failures after a delay (see [Broken Link Handling](#broken-link-handling)).
 * Checks relative links against the documents in the Sphinx build (see [Relative Links](#relative-links)).
 * Checks DOI links with the DOI API instead of the publisher's site (see [DOI Links](#doi-links)).
+* Checks GitHub file links that `github.com` throttles on `raw.githubusercontent.com` (see [GitHub File Links](#github-file-links)).
 * Writes collapsed tables of failing, warning, and ignored links to the job summary, and adds a single annotation giving the number of failing links.
 * Exposes whether any links are still broken as an action output.
 * Optionally fails the build when broken links are found.
@@ -73,12 +76,12 @@ This composite action:
 
 ## Broken Link Handling
 
-Sphinx `linkcheck` reports most failures as `broken` (Sphinx 8.x reports timeouts as `timeout`), and its `linkcheck_retries` setting retries immediately with no delay. To avoid failing jobs on short network outages, this action reads `linkcheck-output.json` and classifies each broken link:
+Sphinx `linkcheck` reports most failures as `broken` (Sphinx 8.x reports timeouts as `timeout`, and both Sphinx 5.x and 8.x report `503 Service Unavailable` as `ignored`), and its `linkcheck_retries` setting retries immediately with no delay. To avoid failing jobs on short network outages, this action reads `linkcheck-output.json` and classifies each broken link:
 
 | Category | Errors | Result |
 | :--- | :--- | :--- |
 | **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, TLS/SSL certificate errors, malformed URLs (e.g. `https://` with no host, or a repeated scheme such as `https://https://...`) | Reported as an error |
-| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx, temporary DNS failures, and any other error | Re-checked |
+| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx (including `503` responses that Sphinx reports as `ignored`), temporary DNS failures, and any other error | Re-checked |
 
 Transient failures are re-checked up to `recheck-attempts` times, waiting `recheck-delay` seconds before the first re-check and doubling the wait each time (15s, then 30s by default). Re-checks request the URL without its anchor, using the same User-Agent as Sphinx.
 
@@ -90,7 +93,7 @@ The job fails only when errors are reported and `fail-on-broken-links` is `"true
 
 All errors and warnings are listed in the step log and in collapsed **Failing Links** and **Warnings** tables in the job summary, with the file and line containing each link. If any links fail, a single annotation reports how many (e.g. `55 of 464 links failed. See the job summary for details.`). It is an error if `fail-on-broken-links` is `"true"`, otherwise a warning.
 
-Links that Sphinx does not check (those matching `linkcheck_ignore`, and in Sphinx 8.x, those returning `503 Service Unavailable`) are listed with clickable URLs in a collapsed **Ignored Links** table in the job summary, so they can be checked by hand. They do not affect the job result.
+Links that Sphinx does not check (for example, those matching `linkcheck_ignore`) are listed with clickable URLs in a collapsed **Ignored Links** table in the job summary, so they can be checked by hand. They do not affect the job result.
 
 ---
 
@@ -120,6 +123,18 @@ When `check-dois` is `"true"`, this action checks every `doi.org` or `dx.doi.org
 * **Lookup failed** (connection error, timeout, or unexpected response): the link is re-checked like other transient failures.
 
 This confirms that the DOI is registered, not that the publisher's page loads. Anchors on DOI links are not checked. Components can keep publisher DOI patterns such as `r'https://doi\.org/10\.1175/.*'` in `linkcheck_ignore`, which stops Sphinx from requesting the publisher's page while the DOI is still checked.
+
+---
+
+## GitHub File Links
+
+GitHub throttles unauthenticated requests for file pages (`https://github.com/<owner>/<repo>/blob/<ref>/<path>`), returning `503` or `429`, and the throttling usually lasts longer than the re-check delays. When a GitHub file link fails with `503` or `429`, this action checks the same file on `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` instead:
+
+* **Found:** the link passes.
+* **Not found (`404`):** the link is reported as an error, so a renamed or deleted file still fails the job.
+* **Any other error:** the link is re-checked on `raw.githubusercontent.com` like other transient failures.
+
+This confirms that the file exists, not that the `github.com` page loads. Line anchors such as `#L55` are not checked. Other GitHub links, and GitHub file links that fail for other reasons (e.g. `404`), are handled as usual.
 
 ---
 
