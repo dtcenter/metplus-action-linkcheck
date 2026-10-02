@@ -282,6 +282,14 @@ def uri_cell(link):
     return escape_cell(link['uri'])
 
 
+def collapsed_table(title, header, rows):
+    """Return the lines of a Markdown table in a collapsed section."""
+    return (['', '<details>', f'<summary>{title} ({len(rows)})</summary>', '',
+             '| ' + ' | '.join(header) + ' |',
+             '| ' + ' | '.join(':---' for _ in header) + ' |']
+            + rows + ['', '</details>'])
+
+
 def write_summary(path, failing, warnings, ignored, total):
     lines = ['## Linkcheck Results', '']
     if not failing and not warnings:
@@ -295,24 +303,18 @@ def write_summary(path, failing, warnings, ignored, total):
     for title, links in (('Failing Links', failing), ('Warnings', warnings)):
         if not links:
             continue
-        lines += ['', f'### {title}', '',
-                  '| Location | URI | Result | Details |',
-                  '| :--- | :--- | :--- | :--- |']
-        for link in links:
-            lines.append(f'| {escape_cell(link["path"])}:{link["lineno"]} '
-                         f'| {uri_cell(link)} '
-                         f'| {link["result"]} '
-                         f'| {escape_cell(link["info"])} |')
+        rows = [f'| {escape_cell(link["path"])}:{link["lineno"]} '
+                f'| {uri_cell(link)} '
+                f'| {link["result"]} '
+                f'| {escape_cell(link["info"])} |' for link in links]
+        lines += collapsed_table(title, ('Location', 'URI', 'Result',
+                                         'Details'), rows)
     if ignored:
-        lines += ['', '<details>',
-                  f'<summary>Ignored Links ({len(ignored)})</summary>', '',
-                  '| Location | URI | Reason |',
-                  '| :--- | :--- | :--- |']
-        for link in ignored:
-            lines.append(f'| {escape_cell(link["path"])}:{link["lineno"]} '
-                         f'| {markdown_link(link["uri"])} '
-                         f'| {escape_cell(link["info"])} |')
-        lines += ['', '</details>']
+        rows = [f'| {escape_cell(link["path"])}:{link["lineno"]} '
+                f'| {markdown_link(link["uri"])} '
+                f'| {escape_cell(link["info"])} |' for link in ignored]
+        lines += collapsed_table('Ignored Links',
+                                 ('Location', 'URI', 'Reason'), rows)
     with open(path, 'a') as file_handle:
         file_handle.write('\n'.join(lines) + '\n')
 

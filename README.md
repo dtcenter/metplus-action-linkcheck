@@ -19,7 +19,7 @@ failure thresholds.
 * Check relative links against the documents in the Sphinx build (#3)
 * Show the Read the Docs URL of broken relative links for the current branch
 * Re-check and report links that time out
-* List ignored links in a collapsed table in the job summary
+* List failing, warning, and ignored links in collapsed tables in the job summary
 
 ### v1
 * **2026-07-08**
@@ -36,7 +36,7 @@ This composite action:
 * Runs the Sphinx `linkcheck` builder against the specified documentation source tree.
 * Classifies broken links as permanent or transient, re-checking transient failures after a delay (see [Broken Link Handling](#broken-link-handling)).
 * Checks relative links against the documents in the Sphinx build (see [Relative Links](#relative-links)).
-* Writes a results table to the job summary, along with a collapsed table of ignored links, and adds a single annotation giving the number of failing links.
+* Writes collapsed tables of failing, warning, and ignored links to the job summary, and adds a single annotation giving the number of failing links.
 * Exposes whether any links are still broken as an action output.
 * Optionally fails the build when broken links are found.
 * Optionally uploads the detailed linkcheck output text files as a workflow artifact.
@@ -84,7 +84,7 @@ Transient failures are re-checked up to `recheck-attempts` times, waiting `reche
 
 The job fails only when errors are reported and `fail-on-broken-links` is `"true"`. The job also fails if `sphinx-build` itself fails for reasons other than broken links.
 
-All errors and warnings are listed in the job summary, with the file and line containing each link, and in the step log. If any links fail, a single annotation reports how many (e.g. `55 of 464 links failed. See the job summary for details.`). It is an error if `fail-on-broken-links` is `"true"`, otherwise a warning.
+All errors and warnings are listed in the step log and in collapsed **Failing Links** and **Warnings** tables in the job summary, with the file and line containing each link. If any links fail, a single annotation reports how many (e.g. `55 of 464 links failed. See the job summary for details.`). It is an error if `fail-on-broken-links` is `"true"`, otherwise a warning.
 
 Links that Sphinx does not check (those matching `linkcheck_ignore`, and in Sphinx 8.x, those returning `503 Service Unavailable`) are listed with clickable URLs in a collapsed **Ignored Links** table in the job summary, so they can be checked by hand. They do not affect the job result.
 
