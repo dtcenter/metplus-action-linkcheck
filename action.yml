@@ -38,6 +38,10 @@ inputs:
     description: 'Read the Docs URL with a {version} placeholder (e.g. https://metplus.readthedocs.io/en/{version}/). If set, broken relative links are reported with their Read the Docs URL for the current branch. The URL is shown, not checked.'
     required: false
     default: ''
+  check-dois:
+    description: 'If "true", check doi.org links with the DOI API (https://doi.org/api/handles/) instead of the publisher site, including links ignored by linkcheck_ignore.'
+    required: false
+    default: 'true'
   upload-artifact:
     description: 'If "true", upload the linkcheck output as a workflow artifact'
     required: false
@@ -107,6 +111,7 @@ runs:
         RECHECK_DELAY: ${{ inputs.recheck-delay }}
         FAIL_ON_TRANSIENT: ${{ inputs.fail-on-transient }}
         RTD_URL: ${{ inputs.rtd-url }}
+        CHECK_DOIS: ${{ inputs.check-dois }}
       run: |
         set +e
         cd "$DOCS_PATH"
@@ -142,6 +147,7 @@ runs:
           --fail-on-transient "$FAIL_ON_TRANSIENT" \
           --fail-on-broken-links "$FAIL_ON_BROKEN_LINKS" \
           --rtd-url "$RTD_URL" \
+          --check-dois "$CHECK_DOIS" \
           --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
         result=$?
 

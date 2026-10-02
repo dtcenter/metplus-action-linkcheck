@@ -21,6 +21,7 @@ failure thresholds.
 * Re-check and report links that time out
 * Report malformed URLs as errors without re-checking them
 * List failing, warning, and ignored links in collapsed tables in the job summary
+* Check DOI links with the DOI API, including links ignored by `linkcheck_ignore`
 
 ### v1
 * **2026-07-08**
@@ -37,6 +38,7 @@ This composite action:
 * Runs the Sphinx `linkcheck` builder against the specified documentation source tree.
 * Classifies broken links as permanent or transient, re-checking transient failures after a delay (see [Broken Link Handling](#broken-link-handling)).
 * Checks relative links against the documents in the Sphinx build (see [Relative Links](#relative-links)).
+* Checks DOI links with the DOI API instead of the publisher's site (see [DOI Links](#doi-links)).
 * Writes collapsed tables of failing, warning, and ignored links to the job summary, and adds a single annotation giving the number of failing links.
 * Exposes whether any links are still broken as an action output.
 * Optionally fails the build when broken links are found.
@@ -57,6 +59,7 @@ This composite action:
 | **recheck-delay** | Seconds to wait before the first re-check. The wait doubles before each additional re-check. | No | `15` |
 | **fail-on-transient** | If `"true"`, links that still fail with a transient error after all re-checks are reported as errors. If `"false"`, they are reported as warnings instead. | No | `true` |
 | **rtd-url** | Read the Docs URL with a `{version}` placeholder, e.g. `https://metplus.readthedocs.io/en/{version}/`. If set, broken relative links are reported with their Read the Docs URL for the current branch (see [Relative Links](#relative-links)). | No | `''` |
+| **check-dois** | If `"true"`, check `doi.org` links with the DOI API instead of the publisher's site, including links ignored by `linkcheck_ignore` (see [DOI Links](#doi-links)). | No | `true` |
 | **upload-artifact** | If `"true"`, upload the linkcheck output as a workflow artifact. | No | `true` |
 | **artifact-name** | Name for the uploaded linkcheck artifact. | No | `linkcheck-output` |
 
@@ -103,6 +106,20 @@ Instead, this action checks them against the documents read by the Sphinx build,
 * Anchors on relative links are not checked.
 
 If `rtd-url` is set, each broken relative link is also shown with its Read the Docs URL for the branch being built. `{version}` is replaced with the branch name (`GITHUB_HEAD_REF` for pull requests, otherwise `GITHUB_REF_NAME`), converted the way Read the Docs names versions: lowercase, with characters other than `a-z`, `0-9`, `.`, `_`, and `-` replaced by `-`. This URL is shown for convenience and is not requested, so it may not exist yet if Read the Docs has not finished building the branch.
+
+---
+
+## DOI Links
+
+Many publishers (e.g. AMS, DOI prefix `10.1175`, and Wiley, prefix `10.1002`) return `403` or `405` to automated requests, so their DOI links are often added to `linkcheck_ignore`. Ignored links are never checked, so a mistyped DOI would not be caught.
+
+When `check-dois` is `"true"`, this action checks every `doi.org` or `dx.doi.org` link that Sphinx reports as `ignored`, `broken`, or `timeout` with the DOI API (`https://doi.org/api/handles/<doi>`), which says whether a DOI is registered without loading the publisher's page:
+
+* **Found:** the link passes, and is not listed in the Ignored Links table.
+* **Not found:** the link is reported as an error (`DOI ... not found`).
+* **Lookup failed** (connection error, timeout, or unexpected response): the link is re-checked like other transient failures.
+
+This confirms that the DOI is registered, not that the publisher's page loads. Anchors on DOI links are not checked. Components can keep publisher DOI patterns such as `r'https://doi\.org/10\.1175/.*'` in `linkcheck_ignore`, which stops Sphinx from requesting the publisher's page while the DOI is still checked.
 
 ---
 

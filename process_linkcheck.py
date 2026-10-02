@@ -6,6 +6,7 @@ Broken links are classified as permanent (e.g. 404, missing anchor, unknown
 host) or transient (e.g. connection errors, timeouts, 429, 5xx). Transient
 failures are re-checked after an increasing delay. Relative links are checked
 against the documents read by the Sphinx build instead of over the network.
+DOI links, including ignored ones, are checked with the DOI API.
 Results are listed in the log and as Markdown tables in the job summary,
 including a collapsed table of ignored links. If any links fail, a single
 GitHub Actions annotation reports how many.
@@ -21,7 +22,7 @@ import posixpath
 import re
 import sys
 import time
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import requests
 
@@ -49,6 +50,9 @@ URL_ERRORS = (
     'invalid schema',
     'no connection adapters',
 )
+
+DOI_HOSTS = ('doi.org', 'dx.doi.org', 'www.doi.org')
+DOI_API = 'https://doi.org/api/handles/'
 
 # pages written by the HTML builder that have no source document
 BUILDER_PAGES = ('search', 'genindex', 'py-modindex')
@@ -122,6 +126,42 @@ def get_malformed_reason(uri):
         return (f"malformed URL: host name is '{host}' "
                 f"(is the scheme repeated?)")
     return None
+
+
+def get_doi(uri):
+    """Return the DOI from a doi.org link, or None if it is not one."""
+    try:
+        parts = urlsplit(uri)
+        host = parts.hostname
+    except ValueError:
+        return None
+    if parts.scheme not in ('http', 'https') or host not in DOI_HOSTS:
+        return None
+    doi = unquote(parts.path).lstrip('/')
+    return doi if doi.startswith('10.') else None
+
+
+def check_doi(doi, timeout, user_agent):
+    """Look up a DOI with the DOI API. Return (ok, code, info)."""
+    url = DOI_API + quote(doi, safe='/')
+    try:
+        response = requests.get(url, timeout=timeout,
+                                headers={'User-Agent': user_agent})
+        response_code = response.json().get('responseCode')
+    except (requests.RequestException, ValueError) as err:
+        return False, 0, f'DOI lookup failed: {err}'
+    if response_code == 1:
+        return True, response.status_code, ''
+    if response_code == 100:
+        return False, 404, f'DOI {doi} not found'
+    code = response.status_code if response.status_code >= 500 else 0
+    return (False, code, f'DOI lookup returned HTTP {response.status_code} '
+                         f'with responseCode {response_code}')
+
+
+def classify_doi(code):
+    """Only a DOI the API reports as not found is a permanent failure."""
+    return PERMANENT if code == 404 else TRANSIENT
 
 
 def is_relative(uri):
@@ -232,7 +272,10 @@ def recheck(links, attempts, delay, timeout):
 
         still_failing = []
         for link in pending:
-            ok, code, info = check_url(link['uri'], timeout, user_agent)
+            if link.get('doi'):
+                ok, code, info = check_doi(link['doi'], timeout, user_agent)
+            else:
+                ok, code, info = check_url(link['uri'], timeout, user_agent)
             link['attempts'] = attempt
             if ok:
                 link['result'] = 'recovered'
@@ -240,7 +283,9 @@ def recheck(links, attempts, delay, timeout):
                 continue
             link['info'] = info
             print(f'  still failing: {link["uri"]}: {info}')
-            if classify(code, info) == PERMANENT:
+            category = (classify_doi(code) if link.get('doi')
+                        else classify(code, info))
+            if category == PERMANENT:
                 link['category'] = PERMANENT
                 link['result'] = 'broken'
             else:
@@ -290,7 +335,7 @@ def collapsed_table(title, header, rows):
             + rows + ['', '</details>'])
 
 
-def write_summary(path, failing, warnings, ignored, total):
+def write_summary(path, failing, warnings, ignored, total, doi_count):
     lines = ['## Linkcheck Results', '']
     if not failing and not warnings:
         summary = f'All {total} checked links passed'
@@ -300,6 +345,9 @@ def write_summary(path, failing, warnings, ignored, total):
     if ignored:
         summary += f', {len(ignored)} ignored'
     lines.append(summary + '.')
+    if doi_count:
+        lines += ['', f'{doi_count} DOI link(s) were checked with the DOI API '
+                      f'(`{DOI_API}`) instead of the publisher\'s site.']
     for title, links in (('Failing Links', failing), ('Warnings', warnings)):
         if not links:
             continue
@@ -350,6 +398,9 @@ def main():
                              'used to show where broken relative links point')
     parser.add_argument('--branch', default='',
                         help='branch being built, used for {version}')
+    parser.add_argument('--check-dois', default='true',
+                        help='if "true", check doi.org links, including '
+                             'ignored ones, with the DOI API')
     args = parser.parse_args()
 
     fail_on_transient = args.fail_on_transient.lower() == 'true'
@@ -357,6 +408,8 @@ def main():
     doctree_dir = args.doctree_dir or os.path.join(
         os.path.dirname(args.output_json), '.doctrees')
     rtd_base = get_rtd_base(args.rtd_url, args.branch)
+    check_dois = args.check_dois.lower() == 'true'
+    user_agent = get_user_agent()
 
     with open(args.output_json) as file_handle:
         entries = [json.loads(line) for line in file_handle if line.strip()]
@@ -365,6 +418,9 @@ def main():
     ignored = []
     docnames = None
     relative_ok = 0
+    doi_results = {}
+    doi_count = 0
+    doi_ignored = 0
     for entry in entries:
         status = entry.get('status')
         link = {
@@ -376,6 +432,24 @@ def main():
             'result': 'broken',
             'attempts': 0,
         }
+        doi = None
+        if check_dois and status in ('ignored', 'broken', 'timeout'):
+            doi = get_doi(entry['uri'])
+        if doi:
+            if doi not in doi_results:
+                doi_results[doi] = check_doi(doi, args.timeout, user_agent)
+            ok, code, info = doi_results[doi]
+            doi_count += 1
+            if status == 'ignored':
+                doi_ignored += 1
+            if ok:
+                continue
+            link['doi'] = doi
+            link['info'] = info
+            link['category'] = classify_doi(code)
+            links.append(link)
+            continue
+
         if status == 'ignored':
             link['info'] = link['info'] or 'matches linkcheck_ignore'
             ignored.append(link)
@@ -405,11 +479,16 @@ def main():
             link['category'] = classify(entry.get('code'), entry.get('info'))
         links.append(link)
 
-    total = sum(1 for entry in entries
-                if entry.get('status') not in ('unchecked', 'ignored', 'local'))
+    total = doi_ignored + sum(
+        1 for entry in entries
+        if entry.get('status') not in ('unchecked', 'ignored', 'local'))
     transient = [link for link in links if link['category'] == TRANSIENT]
     if relative_ok:
         print(f'Found {relative_ok} relative link(s) in the docs build')
+    if doi_count:
+        found = sum(1 for result in doi_results.values() if result[0])
+        print(f'Checked {doi_count} DOI link(s) with the DOI API: '
+              f'{found} of {len(doi_results)} unique DOI(s) found')
     print(f'Linkcheck reported {len(links)} broken link(s): '
           f'{len(links) - len(transient)} permanent, '
           f'{len(transient)} transient')
@@ -426,13 +505,13 @@ def main():
     for link in links:
         if link['result'] == 'recovered':
             report('warning', link,
-                     f'Link {link["uri"]} failed linkcheck but recovered '
-                     f'after {link["attempts"]} re-check(s)')
+                   f'Link {link["uri"]} failed linkcheck but recovered '
+                   f'after {link["attempts"]} re-check(s)')
             warnings.append(link)
         elif link['result'] == 'unreachable' and not fail_on_transient:
             report('warning', link,
-                     f'Link {link["uri"]} is still unreachable after '
-                     f'{link["attempts"]} re-check(s): {link["info"]}')
+                   f'Link {link["uri"]} is still unreachable after '
+                   f'{link["attempts"]} re-check(s): {link["info"]}')
             warnings.append(link)
         else:
             message = f'Broken link {link["uri"]}: {link["info"]}'
@@ -443,7 +522,8 @@ def main():
 
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary_file:
-        write_summary(summary_file, failing, warnings, ignored, total)
+        write_summary(summary_file, failing, warnings, ignored, total,
+                      doi_count)
 
     still_broken = [link for link in links if link['result'] != 'recovered']
     set_output('broken_links_found', 'true' if still_broken else 'false')
