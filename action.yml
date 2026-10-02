@@ -140,6 +140,7 @@ runs:
           --recheck-attempts "$RECHECK_ATTEMPTS" \
           --recheck-delay "$RECHECK_DELAY" \
           --fail-on-transient "$FAIL_ON_TRANSIENT" \
+          --fail-on-broken-links "$FAIL_ON_BROKEN_LINKS" \
           --rtd-url "$RTD_URL" \
           --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
         result=$?

@@ -6,8 +6,9 @@ Broken links are classified as permanent (e.g. 404, missing anchor, unknown
 host) or transient (e.g. connection errors, timeouts, 429, 5xx). Transient
 failures are re-checked after an increasing delay. Relative links are checked
 against the documents read by the Sphinx build instead of over the network.
-Results are reported as GitHub Actions annotations and as Markdown tables in
-the job summary, including a collapsed table of ignored links.
+Results are listed in the log and as Markdown tables in the job summary,
+including a collapsed table of ignored links. If any links fail, a single
+GitHub Actions annotation reports how many.
 
 Exit status is 1 if any link should fail the job, otherwise 0.
 """
@@ -228,13 +229,13 @@ def escape_data(value):
     return value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
 
 
-def escape_property(value):
-    return escape_data(value).replace(':', '%3A').replace(',', '%2C')
+def report(level, link, message):
+    """Print one link result to the log."""
+    print(f'{level}: {link["path"]}:{link["lineno"]}: {message}')
 
 
-def annotate(level, link, message):
-    print(f'::{level} file={escape_property(link["path"])},'
-          f'line={link["lineno"]},title=Linkcheck::{escape_data(message)}')
+def annotate(level, message):
+    print(f'::{level} title=Linkcheck::{escape_data(message)}')
 
 
 def escape_cell(value):
@@ -304,11 +305,14 @@ def main():
     parser.add_argument('output_json',
                         help='path to the linkcheck output.json file')
     parser.add_argument('--docs-path', default='docs',
-                        help='docs directory, used to build annotation paths')
+                        help='docs directory, used to build file paths')
     parser.add_argument('--recheck-attempts', type=int, default=2)
     parser.add_argument('--recheck-delay', type=int, default=15)
     parser.add_argument('--timeout', type=int, default=30)
     parser.add_argument('--fail-on-transient', default='true')
+    parser.add_argument('--fail-on-broken-links', default='true',
+                        help='if "true", report failing links as an error '
+                             'annotation, otherwise as a warning')
     parser.add_argument('--doctree-dir',
                         help='Sphinx doctree directory containing '
                              'environment.pickle (default: .doctrees next '
@@ -321,6 +325,7 @@ def main():
     args = parser.parse_args()
 
     fail_on_transient = args.fail_on_transient.lower() == 'true'
+    fail_on_broken = args.fail_on_broken_links.lower() == 'true'
     doctree_dir = args.doctree_dir or os.path.join(
         os.path.dirname(args.output_json), '.doctrees')
     rtd_base = get_rtd_base(args.rtd_url, args.branch)
@@ -389,12 +394,12 @@ def main():
     warnings = []
     for link in links:
         if link['result'] == 'recovered':
-            annotate('warning', link,
+            report('warning', link,
                      f'Link {link["uri"]} failed linkcheck but recovered '
                      f'after {link["attempts"]} re-check(s)')
             warnings.append(link)
         elif link['result'] == 'unreachable' and not fail_on_transient:
-            annotate('warning', link,
+            report('warning', link,
                      f'Link {link["uri"]} is still unreachable after '
                      f'{link["attempts"]} re-check(s): {link["info"]}')
             warnings.append(link)
@@ -402,7 +407,7 @@ def main():
             message = f'Broken link {link["uri"]}: {link["info"]}'
             if link.get('rtd_link'):
                 message += f' (Read the Docs: {link["rtd_link"]})'
-            annotate('error', link, message)
+            report('error', link, message)
             failing.append(link)
 
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
@@ -413,6 +418,10 @@ def main():
     set_output('broken_links_found', 'true' if still_broken else 'false')
 
     print(f'Result: {len(failing)} failing, {len(warnings)} warning(s)')
+    if failing:
+        annotate('error' if fail_on_broken else 'warning',
+                 f'{len(failing)} of {total} links failed. '
+                 f'See the job summary for details.')
     return 1 if failing else 0
 
 
