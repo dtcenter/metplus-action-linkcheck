@@ -11,7 +11,7 @@ inputs:
     required: false
     default: 'docs/requirements.txt'
   python-version:
-    description: 'Python version to use'
+    description: 'Python version to use. Must be 3.12 or older for repos that pin Sphinx < 6, which imports the imghdr module removed in Python 3.13.'
     required: false
     default: '3.12'
   install-package:
@@ -20,6 +20,18 @@ inputs:
     default: 'false'
   fail-on-broken-links:
     description: 'If "true", the action fails when linkcheck reports broken links'
+    required: false
+    default: 'true'
+  recheck-attempts:
+    description: 'Number of times to re-check links that fail with a transient error (connection error, timeout, 429, or 5xx). Use 0 to disable re-checks.'
+    required: false
+    default: '2'
+  recheck-delay:
+    description: 'Seconds to wait before the first re-check. The wait doubles before each additional re-check.'
+    required: false
+    default: '15'
+  fail-on-transient:
+    description: 'If "true", links that still fail with a transient error after all re-checks are reported as errors. If "false", they are reported as warnings instead.'
     required: false
     default: 'true'
   upload-artifact:
@@ -33,13 +45,35 @@ inputs:
 
 outputs:
   broken-links-found:
-    description: '"true" if linkcheck reported any broken links'
+    description: '"true" if any links are still broken after re-checks, including transient failures reported as warnings'
     value: ${{ steps.run-linkcheck.outputs.broken_links_found }}
 
 runs:
   using: 'composite'
   steps:
+    - name: Check for requirements file
+      id: requirements
+      shell: bash
+      env:
+        REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+      run: |
+        if [ -f "$REQUIREMENTS_FILE" ]; then
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # pip caching requires a dependency file to compute the cache key
+    - name: Set up Python with pip cache
+      if: ${{ steps.requirements.outputs.found == 'true' }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: 'pip'
+        cache-dependency-path: ${{ inputs.requirements-file }}
+
     - name: Set up Python
+      if: ${{ steps.requirements.outputs.found != 'true' }}
       uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
@@ -62,12 +96,18 @@ runs:
     - name: Run linkcheck
       id: run-linkcheck
       shell: bash
+      env:
+        DOCS_PATH: ${{ inputs.docs-path }}
+        FAIL_ON_BROKEN_LINKS: ${{ inputs.fail-on-broken-links }}
+        RECHECK_ATTEMPTS: ${{ inputs.recheck-attempts }}
+        RECHECK_DELAY: ${{ inputs.recheck-delay }}
+        FAIL_ON_TRANSIENT: ${{ inputs.fail-on-transient }}
       run: |
         set +e
-        cd "${{ inputs.docs-path }}"
+        cd "$DOCS_PATH"
         sphinx-build -b linkcheck . _build/linkcheck
         status=$?
-        
+
         # Rename output files to linkcheck-output files if they exist
         if [ -f "_build/linkcheck/output.txt" ]; then
           mv _build/linkcheck/output.txt _build/linkcheck/linkcheck-output.txt
@@ -75,19 +115,30 @@ runs:
         if [ -f "_build/linkcheck/output.json" ]; then
           mv _build/linkcheck/output.json _build/linkcheck/linkcheck-output.json
         fi
-        
-        cd - > /dev/null
-        set -e
 
-        # Check for broken links in the renamed file
-        if grep -rlq "broken" "${{ inputs.docs-path }}/_build/linkcheck/linkcheck-output.txt" 2>/dev/null; then
-          echo "broken_links_found=true" >> "$GITHUB_OUTPUT"
-        else
+        cd - > /dev/null
+
+        # sphinx-build exits with 1 for broken links and 2 for other errors
+        output_json="$DOCS_PATH/_build/linkcheck/linkcheck-output.json"
+        if [ "$status" -gt 1 ] || [ ! -f "$output_json" ]; then
+          echo "::error::sphinx-build linkcheck failed with exit status $status"
           echo "broken_links_found=false" >> "$GITHUB_OUTPUT"
+          if [ "$FAIL_ON_BROKEN_LINKS" = "true" ]; then
+            exit 1
+          fi
+          exit 0
         fi
 
-        if [ "${{ inputs.fail-on-broken-links }}" = "true" ] && [ "$status" -ne 0 ]; then
-          exit $status
+        # Classify broken links, re-check transient failures, and report results
+        python "${{ github.action_path }}/process_linkcheck.py" "$output_json" \
+          --docs-path "$DOCS_PATH" \
+          --recheck-attempts "$RECHECK_ATTEMPTS" \
+          --recheck-delay "$RECHECK_DELAY" \
+          --fail-on-transient "$FAIL_ON_TRANSIENT"
+        result=$?
+
+        if [ "$FAIL_ON_BROKEN_LINKS" = "true" ] && [ "$result" -ne 0 ]; then
+          exit 1
         fi
         exit 0
 
