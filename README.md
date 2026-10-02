@@ -10,7 +10,7 @@ failure thresholds.
 
 ## Version History
 
-### v2
+### v1.6.0
 * **2026-10-01**
 * Re-check transient link failures before failing (#1)
 * Report broken links as annotations and in the job summary
@@ -90,5 +90,5 @@ This example shows the minimum configuration, assuming your documentation is in 
 
 ```yaml
 - name: Check Documentation Links
-  uses: dtcenter/metplus-action-linkcheck@v2
+  uses: dtcenter/metplus-action-linkcheck@v1
 
