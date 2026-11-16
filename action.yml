@@ -42,6 +42,34 @@ inputs:
     description: 'If "true", check doi.org links with the DOI API (https://doi.org/api/handles/) instead of the publisher site, including links ignored by linkcheck_ignore.'
     required: false
     default: 'true'
+  history-branch:
+    description: 'Orphan branch of the repository being checked that holds the link check history. Leave empty to disable the history, so that every run decides from its own results.'
+    required: false
+    default: 'linkcheck-history'
+  history-file:
+    description: 'Path to the link check history file on the history branch'
+    required: false
+    default: 'linkcheck-history.json'
+  grace-period:
+    description: 'Days a transiently failing link may keep failing before it fails the job. Permanent failures (404, missing anchors, unknown hosts) always fail at once.'
+    required: false
+    default: '14'
+  min-failures:
+    description: 'Consecutive failed checks required before a link can fail the job'
+    required: false
+    default: '2'
+  history-retention:
+    description: 'Days to keep a history record for a URL that is no longer found in the documentation'
+    required: false
+    default: '90'
+  update-history:
+    description: 'If "true", write the history back to the history branch. If "auto", write it for every event except pull_request and pull_request_target. If "false", never write it.'
+    required: false
+    default: 'auto'
+  history-token:
+    description: 'Token used to read and write the history branch. The default GITHUB_TOKEN needs "permissions: contents: write" in the calling workflow for the runs that write the history.'
+    required: false
+    default: ${{ github.token }}
   upload-artifact:
     description: 'If "true", upload the linkcheck output as a workflow artifact'
     required: false
@@ -101,6 +129,17 @@ runs:
       shell: bash
       run: pip install -e .
 
+    - name: Read link check history
+      id: history
+      shell: bash
+      env:
+        HISTORY_BRANCH: ${{ inputs.history-branch }}
+        HISTORY_FILE: ${{ inputs.history-file }}
+        HISTORY_TOKEN: ${{ inputs.history-token }}
+        HISTORY_WORK: ${{ runner.temp }}/linkcheck-history
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${{ github.action_path }}/linkcheck_branch.sh" fetch
+
     - name: Run linkcheck
       id: run-linkcheck
       shell: bash
@@ -112,6 +151,13 @@ runs:
         FAIL_ON_TRANSIENT: ${{ inputs.fail-on-transient }}
         RTD_URL: ${{ inputs.rtd-url }}
         CHECK_DOIS: ${{ inputs.check-dois }}
+        USE_HISTORY: ${{ steps.history.outputs.enabled }}
+        HISTORY_JSON: ${{ steps.history.outputs.path }}
+        HISTORY_RESULTS: ${{ runner.temp }}/linkcheck-history/results.json
+        HISTORY_BRANCH: ${{ inputs.history-branch }}
+        GRACE_PERIOD: ${{ inputs.grace-period }}
+        MIN_FAILURES: ${{ inputs.min-failures }}
+        HISTORY_RETENTION: ${{ inputs.history-retention }}
       run: |
         set +e
         cd "$DOCS_PATH"
@@ -139,6 +185,18 @@ runs:
           exit 0
         fi
 
+        # Decide transient failures from the link check history, if there is one
+        history_args=()
+        if [ "$USE_HISTORY" = "true" ]; then
+          history_args=(--use-history true \
+                        --history-file "$HISTORY_JSON" \
+                        --history-results "$HISTORY_RESULTS" \
+                        --history-branch "$HISTORY_BRANCH" \
+                        --grace-period "$GRACE_PERIOD" \
+                        --min-failures "$MIN_FAILURES" \
+                        --history-retention "$HISTORY_RETENTION")
+        fi
+
         # Classify broken links, re-check transient failures, and report results
         python "${{ github.action_path }}/process_linkcheck.py" "$output_json" \
           --docs-path "$DOCS_PATH" \
@@ -148,13 +206,32 @@ runs:
           --fail-on-broken-links "$FAIL_ON_BROKEN_LINKS" \
           --rtd-url "$RTD_URL" \
           --check-dois "$CHECK_DOIS" \
-          --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          --branch "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+          ${history_args[@]+"${history_args[@]}"}
         result=$?
 
         if [ "$FAIL_ON_BROKEN_LINKS" = "true" ] && [ "$result" -ne 0 ]; then
           exit 1
         fi
         exit 0
+
+    # written after the links are checked, so that a failing job still records
+    # the run that made it fail
+    - name: Update link check history
+      if: ${{ always() && steps.history.outputs.enabled == 'true'
+              && (inputs.update-history == 'true'
+                  || (inputs.update-history == 'auto'
+                      && github.event_name != 'pull_request'
+                      && github.event_name != 'pull_request_target')) }}
+      shell: bash
+      env:
+        HISTORY_BRANCH: ${{ inputs.history-branch }}
+        HISTORY_FILE: ${{ inputs.history-file }}
+        HISTORY_TOKEN: ${{ inputs.history-token }}
+        HISTORY_RETENTION: ${{ inputs.history-retention }}
+        HISTORY_WORK: ${{ runner.temp }}/linkcheck-history
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${{ github.action_path }}/linkcheck_branch.sh" push
 
     - name: Upload linkcheck output
       if: ${{ always() && inputs.upload-artifact == 'true' }}
