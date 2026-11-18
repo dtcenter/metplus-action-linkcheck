@@ -76,6 +76,11 @@ fetch_branch() {
       "refs/heads/${HISTORY_BRANCH}" > /dev/null 2>&1
   local status=$?
   if [ "$status" -eq 2 ]; then
+    # The branch is gone. Drop any ref left behind by an earlier run of this
+    # workspace, so that the commit this run builds starts a new history
+    # rather than being parented on a commit the remote no longer has, which
+    # it would refuse to accept.
+    git update-ref -d "$LOCAL_REF" 2> /dev/null
     return 1
   fi
   if [ "$status" -ne 0 ]; then
