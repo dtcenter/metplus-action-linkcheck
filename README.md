@@ -15,6 +15,7 @@ failure thresholds.
 * Track the result of every link across runs in a history file on an orphan branch of the repository being checked (#8)
 * Fail only on links that have been failing for longer than a grace period, reporting the rest as warnings
 * Report when a failing link last passed, how long it has been failing, and when it starts failing the job
+* Classify TLS/SSL failures as transient rather than permanent, so that the grace period covers an expired certificate or a refused handshake
 
 ### v1.6.0
 * **2026-10-02**
@@ -94,8 +95,8 @@ Sphinx `linkcheck` reports most failures as `broken` (Sphinx 8.x reports timeout
 
 | Category | Errors | Result |
 | :--- | :--- | :--- |
-| **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, TLS/SSL certificate errors, malformed URLs (e.g. `https://` with no host, or a repeated scheme such as `https://https://...`) | Reported as an error |
-| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx (including `503` responses that Sphinx reports as `ignored`), temporary DNS failures, and any other error | Re-checked |
+| **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, malformed URLs (e.g. `https://` with no host, or a repeated scheme such as `https://https://...`) | Reported as an error |
+| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx (including `503` responses that Sphinx reports as `ignored`), TLS/SSL errors, temporary DNS failures, and any other error | Re-checked |
 
 Transient failures are re-checked up to `recheck-attempts` times, waiting `recheck-delay` seconds before the first re-check and doubling the wait each time (15s, then 30s by default). Re-checks request the URL without its anchor, using the same User-Agent as Sphinx.
 
@@ -140,8 +141,8 @@ One record per URL:
 
 | Failure | Result |
 | :--- | :--- |
-| **Permanent** (404, 410, `Anchor '...' not found`, unknown host, TLS certificate errors, malformed URLs, a DOI that is not registered, a broken relative link) | Fails the job at once, as it did before. The grace period never applies. |
-| **Transient** (connection errors, timeouts, 429, 5xx), failing since before the grace period, seen failing at least `min-failures` times | Fails the job |
+| **Permanent** (404, 410, `Anchor '...' not found`, unknown host, malformed URLs, a DOI that is not registered, a broken relative link) | Fails the job at once, as it did before. The grace period never applies. |
+| **Transient** (connection errors, timeouts, 429, 5xx, TLS failures), failing since before the grace period, seen failing at least `min-failures` times | Fails the job |
 | **Transient**, failing for less than `grace-period` days | Reported as a warning, with the date it last passed and the date it starts failing the job |
 | **Transient**, with no history record at all | Reported as a warning, labeled as seen for the first time, and the grace period takes over from the next run |
 

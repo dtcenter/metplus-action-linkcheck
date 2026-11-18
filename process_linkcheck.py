@@ -51,6 +51,11 @@ DNS_ERRORS = (
     'no address associated with hostname',
 )
 
+# A TLS failure is the server's configuration, not the link: an expired
+# certificate or a handshake the server refuses is fixed by its owner, and the
+# page is still where the documentation says it is. These are classified as
+# transient so that the link check history can hold them inside the grace
+# period while the owner fixes them, rather than failing every build at once.
 SSL_ERRORS = (
     'sslerror',
     'certificate verify failed',
@@ -115,7 +120,7 @@ def classify(code, info):
     if lower.startswith('anchor ') and 'not found' in lower:
         return PERMANENT
     if any(err in lower for err in SSL_ERRORS):
-        return PERMANENT
+        return TRANSIENT
     if any(err in lower for err in URL_ERRORS):
         return PERMANENT
     if 'temporary failure in name resolution' in lower:
