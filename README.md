@@ -11,7 +11,7 @@ failure thresholds.
 ## Version History
 
 ### v1.7.0
-* **2026-11-16**
+* **2026-11-19**
 * Track the result of every link across runs in a history file on an orphan branch of the repository being checked (#8)
 * Fail only on links that have been failing for longer than a grace period, reporting the rest as warnings
 * Report when a failing link last passed, how long it has been failing, and when it starts failing the job
