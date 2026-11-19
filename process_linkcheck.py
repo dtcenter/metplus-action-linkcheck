@@ -53,9 +53,12 @@ DNS_ERRORS = (
 
 # A TLS failure is the server's configuration, not the link: an expired
 # certificate or a handshake the server refuses is fixed by its owner, and the
-# page is still where the documentation says it is. These are classified as
-# transient so that the link check history can hold them inside the grace
-# period while the owner fixes them, rather than failing every build at once.
+# page is still where the documentation says it is. When there is a link check
+# history, these are classified as transient so that the history can hold them
+# inside the grace period while the owner fixes them, rather than failing
+# every build at once. Without one they are permanent, as in v1.6.0, since
+# nothing would hold them and re-checking an expired certificate only delays
+# the same answer.
 SSL_ERRORS = (
     'sslerror',
     'certificate verify failed',
@@ -108,8 +111,12 @@ def get_http_code(code, info):
     return int(match.group(1)) if match else None
 
 
-def classify(code, info):
-    """Classify a broken link as permanent or transient."""
+def classify(code, info, tls_transient=False):
+    """Classify a broken link as permanent or transient.
+
+    TLS failures are transient only if tls_transient is True, which the caller
+    sets when a link check history decides the transient failures.
+    """
     http_code = get_http_code(code, info)
     if http_code is not None:
         if http_code == 429 or http_code >= 500:
@@ -120,7 +127,7 @@ def classify(code, info):
     if lower.startswith('anchor ') and 'not found' in lower:
         return PERMANENT
     if any(err in lower for err in SSL_ERRORS):
-        return TRANSIENT
+        return TRANSIENT if tls_transient else PERMANENT
     if any(err in lower for err in URL_ERRORS):
         return PERMANENT
     if 'temporary failure in name resolution' in lower:
@@ -347,7 +354,7 @@ def check_url(uri, timeout, user_agent):
         return False, 0, str(err)
 
 
-def recheck(links, attempts, delay, timeout):
+def recheck(links, attempts, delay, timeout, tls_transient=False):
     """Re-check transient failures, waiting longer before each attempt."""
     user_agent = get_user_agent()
     pending = list(links)
@@ -378,7 +385,7 @@ def recheck(links, attempts, delay, timeout):
             link['code'] = code or 0
             print(f'  still failing: {link["uri"]}: {info}')
             category = (classify_doi(code) if link.get('doi')
-                        else classify(code, info))
+                        else classify(code, info, tls_transient))
             if category == PERMANENT:
                 link['category'] = PERMANENT
                 link['result'] = 'broken'
@@ -479,7 +486,7 @@ def fails_after_cell(entry):
     if not entry or not entry.get('fails_on'):
         return '-'
     if entry.get('expired'):
-        remaining = entry['min_failures'] - entry['failure_count']
+        remaining = max(entry['min_failures'] - entry['failure_count'], 0)
         return f'{remaining} more check(s)'
     return date_only(entry['fails_on'])
 
@@ -493,7 +500,7 @@ def collapsed_table(title, header, rows):
 
 
 def write_summary(path, failing, warnings, ignored, total, doi_count,
-                  github_count, history_info=None):
+                  github_count, history_info=None, fail_on_transient=True):
     lines = ['## Linkcheck Results', '']
     if not failing and not warnings:
         summary = f'All {total} checked links passed'
@@ -503,6 +510,11 @@ def write_summary(path, failing, warnings, ignored, total, doi_count,
     if ignored:
         summary += f', {len(ignored)} ignored'
     lines.append(summary + '.')
+    if history_info and not history_info['available']:
+        lines += ['', f'Link check history: none usable on the '
+                      f'`{history_info["branch"]}` branch, so transient '
+                      f'failures were decided from this run alone.']
+        history_info = None
     if history_info:
         note = (f'Link check history: {history_info["records"]} record(s) on '
                 f'the `{history_info["branch"]}` branch.')
@@ -529,7 +541,10 @@ def write_summary(path, failing, warnings, ignored, total, doi_count,
                 history_cells = [failing_since_cell]
             else:
                 header += ['Last OK', 'Fails job after']
-                history_cells = [last_ok_cell, fails_after_cell]
+                # nothing unreachable fails the job without fail-on-transient
+                history_cells = [last_ok_cell,
+                                 fails_after_cell if fail_on_transient
+                                 else lambda entry: '-']
         header += ['Details']
         rows = []
         for link in links:
@@ -558,14 +573,36 @@ def set_output(name, value):
         print(f'{name}={value}')
 
 
+def input_int(name):
+    """Return an argparse type for a whole-number action input.
+
+    A bad value would otherwise stop the step with only a usage message, so
+    it is reported as an error annotation that names the input.
+    """
+    def parse(value):
+        try:
+            number = int(value)
+        except ValueError:
+            number = -1
+        if number < 0:
+            annotate('error', f'The {name} input must be a whole number of 0 '
+                              f'or more, not "{value}"')
+            raise argparse.ArgumentTypeError(
+                f'{name} must be a whole number of 0 or more')
+        return number
+    return parse
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output_json',
                         help='path to the linkcheck output.json file')
     parser.add_argument('--docs-path', default='docs',
                         help='docs directory, used to build file paths')
-    parser.add_argument('--recheck-attempts', type=int, default=2)
-    parser.add_argument('--recheck-delay', type=int, default=15)
+    parser.add_argument('--recheck-attempts', type=input_int('recheck-attempts'),
+                        default=2)
+    parser.add_argument('--recheck-delay', type=input_int('recheck-delay'),
+                        default=15)
     parser.add_argument('--timeout', type=int, default=30)
     parser.add_argument('--fail-on-transient', default='true')
     parser.add_argument('--fail-on-broken-links', default='true',
@@ -595,13 +632,19 @@ def main():
     parser.add_argument('--history-branch', default='',
                         help='name of the history branch, reported in the '
                              'job summary')
-    parser.add_argument('--grace-period', type=int, default=14,
+    parser.add_argument('--history-commit', default='',
+                        help='commit the history file was read from, named '
+                             'when the file cannot be read')
+    parser.add_argument('--grace-period', type=input_int('grace-period'),
+                        default=14,
                         help='days a transiently failing link may keep '
                              'failing before it fails the job')
-    parser.add_argument('--min-failures', type=int, default=2,
+    parser.add_argument('--min-failures', type=input_int('min-failures'),
+                        default=2,
                         help='consecutive failed checks required before a '
                              'link can fail the job')
-    parser.add_argument('--history-retention', type=int, default=90,
+    parser.add_argument('--history-retention',
+                        type=input_int('history-retention'), default=90,
                         help='days to keep a record for a URL that is no '
                              'longer in the documentation')
     args = parser.parse_args()
@@ -610,6 +653,28 @@ def main():
     fail_on_broken = args.fail_on_broken_links.lower() == 'true'
     use_history = args.use_history.lower() == 'true'
     checked_at = now_utc()
+    history_branch = args.history_branch or 'link check history'
+
+    # The grace period applies only once there is a history to decide from.
+    # Until a run has written one, and in workflows that never write it (ones
+    # that run only on pull requests, or lack "contents: write"), transient
+    # failures are decided from this run alone, as they were in v1.6.0, so
+    # that turning the history on can never stop a persistent failure from
+    # failing the job.
+    history_records = {}
+    has_history = False
+    if use_history:
+        history_records, problem = load_history(args.history_file)
+        if problem:
+            where = (f' in commit {args.history_commit[:12]}'
+                     if args.history_commit else '')
+            annotate('warning',
+                     f'The link check history on branch {history_branch} '
+                     f'could not be read because {problem}, so transient '
+                     f'failures are decided from this run alone. The next '
+                     f'run that writes the history replaces the file; the '
+                     f'damaged copy is kept{where}.')
+        has_history = not problem and os.path.exists(args.history_file)
     doctree_dir = args.doctree_dir or os.path.join(
         os.path.dirname(args.output_json), '.doctrees')
     rtd_base = get_rtd_base(args.rtd_url, args.branch)
@@ -725,7 +790,8 @@ def main():
         elif status == 'timeout':
             link['category'] = TRANSIENT
         else:
-            link['category'] = classify(entry.get('code'), entry.get('info'))
+            link['category'] = classify(entry.get('code'), entry.get('info'),
+                                        has_history)
         links.append(link)
 
     total = doi_ignored + unavailable + github_ignored + sum(
@@ -752,7 +818,7 @@ def main():
 
     if transient and args.recheck_attempts > 0:
         recheck(transient, args.recheck_attempts, args.recheck_delay,
-                args.timeout)
+                args.timeout, has_history)
     else:
         for link in transient:
             link['result'] = 'unreachable'
@@ -766,14 +832,16 @@ def main():
                           status=link['result'], code=link.get('code'),
                           info=link['info'])
 
-    history_records = {}
     merged = {}
     if use_history:
-        history_records = load_history(args.history_file)
         merged = merge_history(history_records, results, checked_at,
                                args.history_retention)
         print(f'Read {len(history_records)} link check history record(s); '
               f'{len(merged)} record(s) after this run')
+        if not has_history:
+            print(f'No usable link check history on branch {history_branch}, '
+                  f'so transient failures are decided from this run alone')
+    if has_history:
         for link in links:
             if is_history_url(link['uri']):
                 link['history'] = evaluate(merged.get(link['uri'], {}),
@@ -817,7 +885,8 @@ def main():
     history_info = None
     if use_history:
         history_info = {
-            'branch': args.history_branch or 'link check history',
+            'branch': history_branch,
+            'available': has_history,
             'records': len(merged),
             'beyond': beyond_grace,
             'within': within_grace,
@@ -827,13 +896,14 @@ def main():
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary_file:
         write_summary(summary_file, failing, warnings, ignored, total,
-                      doi_count, github_count, history_info)
+                      doi_count, github_count, history_info,
+                      fail_on_transient)
 
     still_broken = [link for link in links if link['result'] != 'recovered']
     set_output('broken_links_found', 'true' if still_broken else 'false')
 
     print(f'Result: {len(failing)} failing, {len(warnings)} warning(s)')
-    if use_history:
+    if has_history:
         print(f'{beyond_grace} link(s) failing beyond the '
               f'{args.grace_period}-day grace period, {within_grace} within '
               f'it')

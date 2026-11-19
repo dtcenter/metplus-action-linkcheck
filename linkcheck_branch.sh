@@ -6,7 +6,7 @@
 #   linkcheck_branch.sh fetch   read the history file from the history branch
 #   linkcheck_branch.sh push    merge this run's results in and push them back
 #
-# The branch holds the history file and nothing else, the way gh-pages holds
+# The branch holds history files and nothing else, the way gh-pages holds
 # built documentation, so it never appears in the history of the branches
 # being built. The commit is built with plumbing commands and pushed straight
 # from the object database, so neither command touches the working tree or the
@@ -118,12 +118,20 @@ history_message() {
 build_commit() {
   local blob tree parent message
   blob=$(git hash-object -w "$MERGED_JSON") || return 1
+  parent=$(git rev-parse --quiet --verify "${LOCAL_REF}^{commit}" \
+      2> /dev/null)
   rm -f "$INDEX_FILE"
-  GIT_INDEX_FILE="$INDEX_FILE" git read-tree --empty || return 1
+  # Start from the branch as it is, so that only the history file is
+  # replaced. Several workflows may keep their own history files on one
+  # branch, and each push must leave the others alone.
+  if [ -n "$parent" ]; then
+    GIT_INDEX_FILE="$INDEX_FILE" git read-tree "$parent" || return 1
+  else
+    GIT_INDEX_FILE="$INDEX_FILE" git read-tree --empty || return 1
+  fi
   GIT_INDEX_FILE="$INDEX_FILE" git update-index --add \
       --cacheinfo "100644,${blob},${HISTORY_FILE}" || return 1
   tree=$(GIT_INDEX_FILE="$INDEX_FILE" git write-tree) || return 1
-  parent=$(git rev-parse --quiet --verify "$LOCAL_REF" 2> /dev/null)
   message=$(history_message)
   if [ -n "$parent" ]; then
     if [ "$(git rev-parse "${parent}^{tree}")" = "$tree" ]; then
@@ -161,6 +169,7 @@ so the link check history is not used for this run."
         set_output 'enabled' 'false'
         return 0
       fi
+      set_output 'commit' "$(git rev-parse "${LOCAL_REF}^{commit}")"
       if [ -f "$HISTORY_JSON" ]; then
         echo "Read ${HISTORY_FILE} from branch ${HISTORY_BRANCH} \
 ($(wc -c < "$HISTORY_JSON" | tr -d ' ') bytes)"

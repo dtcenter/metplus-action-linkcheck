@@ -15,7 +15,8 @@ failure thresholds.
 * Track the result of every link across runs in a history file on an orphan branch of the repository being checked (#8)
 * Fail only on links that have been failing for longer than a grace period, reporting the rest as warnings
 * Report when a failing link last passed, how long it has been failing, and when it starts failing the job
-* Classify TLS/SSL failures as transient rather than permanent, so that the grace period covers an expired certificate or a refused handshake
+* Classify TLS/SSL failures as transient when the history is in use, so that the grace period covers an expired certificate or a refused handshake
+* Decide from each run alone, as in v1.6.0, until the history branch holds a usable history
 
 ### v1.6.0
 * **2026-10-02**
@@ -72,7 +73,7 @@ This composite action:
 | **rtd-url** | Read the Docs URL with a `{version}` placeholder, e.g. `https://metplus.readthedocs.io/en/{version}/`. If set, broken relative links are reported with their Read the Docs URL for the current branch (see [Relative Links](#relative-links)). | No | `''` |
 | **check-dois** | If `"true"`, check `doi.org` links with the DOI API instead of the publisher's site, including links ignored by `linkcheck_ignore` (see [DOI Links](#doi-links)). | No | `true` |
 | **history-branch** | Orphan branch of the repository being checked that holds the link check history (see [Link Check History](#link-check-history)). Leave empty to disable the history, so that every run decides from its own results. | No | `linkcheck-history` |
-| **history-file** | Path to the link check history file on the history branch. | No | `linkcheck-history.json` |
+| **history-file** | Path to the link check history file on the history branch. Several workflows can share one branch by giving each its own file. | No | `linkcheck-history.json` |
 | **grace-period** | Days a transiently failing link may keep failing before it fails the job. Permanent failures always fail at once. | No | `14` |
 | **min-failures** | Consecutive failed checks required before a link can fail the job. | No | `2` |
 | **history-retention** | Days to keep a history record for a URL that is no longer found in the documentation. | No | `90` |
@@ -96,7 +97,7 @@ Sphinx `linkcheck` reports most failures as `broken` (Sphinx 8.x reports timeout
 | Category | Errors | Result |
 | :--- | :--- | :--- |
 | **Permanent** | HTTP 4xx (except 429), `Anchor '...' not found`, host name not found, malformed URLs (e.g. `https://` with no host, or a repeated scheme such as `https://https://...`) | Reported as an error |
-| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx (including `503` responses that Sphinx reports as `ignored`), TLS/SSL errors, temporary DNS failures, and any other error | Re-checked |
+| **Transient** | Connection errors, timeouts (including the `timeout` status), HTTP 429, HTTP 5xx (including `503` responses that Sphinx reports as `ignored`), TLS/SSL errors when the [link check history](#link-check-history) is in use (otherwise they are permanent), temporary DNS failures, and any other error | Re-checked |
 
 Transient failures are re-checked up to `recheck-attempts` times, waiting `recheck-delay` seconds before the first re-check and doubling the wait each time (15s, then 30s by default). Re-checks request the URL without its anchor, using the same User-Agent as Sphinx.
 
@@ -144,13 +145,14 @@ One record per URL:
 | **Permanent** (404, 410, `Anchor '...' not found`, unknown host, malformed URLs, a DOI that is not registered, a broken relative link) | Fails the job at once, as it did before. The grace period never applies. |
 | **Transient** (connection errors, timeouts, 429, 5xx, TLS failures), failing since before the grace period, seen failing at least `min-failures` times | Fails the job |
 | **Transient**, failing for less than `grace-period` days | Reported as a warning, with the date it last passed and the date it starts failing the job |
-| **Transient**, with no history record at all | Reported as a warning, labeled as seen for the first time, and the grace period takes over from the next run |
+| **Transient**, with no record in an existing history | Reported as a warning, labeled as seen for the first time, and the grace period takes over from the next run |
+| **Transient**, with no usable history at all (the branch or file does not exist yet, or the file is damaged) | Fails the job, as in v1.6.0 |
 
 A new link that fails transiently is awkward: it could be a typo in a hostname or a healthy site having a bad hour, and there is no history to tell them apart. It is reported as a warning rather than failing a pull request for the links a reviewer is already looking at. A mistyped host name usually fails as `Name or service not known`, which is a permanent failure and fails the job however new the link is.
 
 Requiring `min-failures` observed failures keeps a link from failing the job on the strength of a single bad run, which matters when runs are infrequent. The decision is made from `first_failure` rather than from `last_success` alone, because the history is only as fresh as the runs that write it: if the documentation workflow does not run for three weeks, every link has a stale `last_success` and a rule based on it would fail all of them at once.
 
-Setting `grace-period` to `0` and `min-failures` to `1` restores the behavior of v1.6.0, where every link still unreachable after its re-checks fails the job. Setting `history-branch` to an empty string does the same and stops the branch from being read or written at all. `fail-on-transient: 'false'` still reports every transient failure as a warning, whatever the history says.
+Setting `grace-period` to `0` and `min-failures` to `1` restores the behavior of v1.6.0, where every link still unreachable after its re-checks fails the job, except that TLS failures are still re-checked before they fail. Setting `history-branch` to an empty string restores it exactly, TLS failures included, and stops the branch from being read or written at all. `fail-on-transient: 'false'` still reports every transient failure as a warning, whatever the history says.
 
 ### Which runs write the history
 
@@ -158,14 +160,17 @@ Setting `grace-period` to `0` and `min-failures` to `1` restores the behavior of
 
 The writing runs need `permissions: contents: write` in the calling workflow. Without it the push is rejected, which is reported as a warning and does not fail the job.
 
-Until the branch has been written at least once, every link is new to the history, so a transient failure is reported as a warning and does not fail the job. A workflow that reads the history but never manages to write it, because it lacks `contents: write`, keeps warning about transient failures forever and never fails on them. After adding this action to a workflow, check the log of the first push or scheduled run for the warning above, and confirm that the history branch was created.
+Until the branch holds the history file, there is nothing to measure a grace period against, so each run decides from its own results as v1.6.0 did: a TLS failure is permanent, and a link still unreachable after its re-checks fails the job. The same applies to a workflow that never manages to write the history, because it runs only on pull requests or lacks `contents: write`, so turning the history on can never stop a persistent failure from failing the job. Such a workflow simply gets no grace period. After adding this action to a workflow, check the log of the first push or scheduled run for the warning above, and confirm that the history branch was created.
 
-Two cautions when choosing `history-branch`:
+A history file that cannot be parsed is reported with a warning annotation naming the commit that holds it, and that run decides from its own results. The next run that writes the history replaces the file with one built from its own results; the damaged copy stays in the branch's log, where it can be recovered with `git show <commit>:<history-file>`.
+
+Three cautions when choosing `history-branch`:
 
 * **The branch name must not match the `push` branch patterns of the calling workflow.** MET's `documentation.yml` triggers on `feature_*`, `main_*`, and `bugfix_*`, so a history branch named for any of those patterns would start another run every time the history is written.
+* **Give each workflow its own `history-file` if several share the branch.** Each push replaces only its own file and leaves the others alone.
 * **Add a `schedule` trigger.** A workflow that only runs on pushes that touch `docs/**` refreshes the history only when the documentation changes, leaving `first_failure` dates weeks apart. A scheduled run also reports a link that has gone dead on its own, instead of waiting for whoever opens the next pull request to find it.
 
-The history is written after the links are checked, so a failing job still records the run that made it fail. The commit is built with git plumbing commands and pushed straight from the object database, so writing it never touches the working tree, the index, or the branch being built. Concurrent runs collide on the branch: a rejected push is retried by fetching the branch again, merging this run's results into what the other run wrote, and pushing again, up to three times.
+The history is written after the links are checked, so a failing job still records the run that made it fail. The commit is built with git plumbing commands and pushed straight from the object database, so writing it never touches the working tree, the index, or the branch being built. Concurrent runs collide on the branch: a rejected push is retried by fetching the branch again, merging this run's results into what the other run wrote, and pushing again, up to three times. A link the other run checked more recently keeps that run's result, so an older pass never clears a newer failure.
 
 ### What the job summary shows
 

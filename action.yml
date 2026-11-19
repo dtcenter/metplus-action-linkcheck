@@ -47,7 +47,7 @@ inputs:
     required: false
     default: 'linkcheck-history'
   history-file:
-    description: 'Path to the link check history file on the history branch'
+    description: 'Path to the link check history file on the history branch. Several workflows can share one branch by giving each its own file.'
     required: false
     default: 'linkcheck-history.json'
   grace-period:
@@ -155,6 +155,7 @@ runs:
         HISTORY_JSON: ${{ steps.history.outputs.path }}
         HISTORY_RESULTS: ${{ runner.temp }}/linkcheck-history/results.json
         HISTORY_BRANCH: ${{ inputs.history-branch }}
+        HISTORY_COMMIT: ${{ steps.history.outputs.commit }}
         GRACE_PERIOD: ${{ inputs.grace-period }}
         MIN_FAILURES: ${{ inputs.min-failures }}
         HISTORY_RETENTION: ${{ inputs.history-retention }}
@@ -192,6 +193,7 @@ runs:
                         --history-file "$HISTORY_JSON" \
                         --history-results "$HISTORY_RESULTS" \
                         --history-branch "$HISTORY_BRANCH" \
+                        --history-commit "$HISTORY_COMMIT" \
                         --grace-period "$GRACE_PERIOD" \
                         --min-failures "$MIN_FAILURES" \
                         --history-retention "$HISTORY_RETENTION")
@@ -210,6 +212,11 @@ runs:
           ${history_args[@]+"${history_args[@]}"}
         result=$?
 
+        # 2 is a bad input, reported as an error annotation, which fails the
+        # step whatever fail-on-broken-links says
+        if [ "$result" -eq 2 ]; then
+          exit 1
+        fi
         if [ "$FAIL_ON_BROKEN_LINKS" = "true" ] && [ "$result" -ne 0 ]; then
           exit 1
         fi

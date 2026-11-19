@@ -74,30 +74,29 @@ def parse_time(value):
 
 
 def load_history(path):
-    """Return the records in a history file, or {} if there are none.
+    """Return (records, problem) for a history file.
 
-    A missing file is not an error: it is what the first run of a repository
-    sees. A file that cannot be parsed is reported and treated as empty, so
-    that a damaged history does not fail every documentation build until
-    someone deletes it by hand.
+    records is {} if there are none. A missing file is not an error: it is
+    what the first run of a repository sees, and problem is None. A file that
+    cannot be parsed is treated as empty, so that a damaged history does not
+    fail every documentation build until someone repairs it by hand, and
+    problem describes what is wrong with it so that the caller can say so.
+    The damaged file is not lost when the next run replaces it, since the
+    commit that held it stays in the history branch's log.
     """
     if not path or not os.path.exists(path):
-        return {}
+        return {}, None
     try:
         with open(path) as file_handle:
             data = json.load(file_handle)
     except (OSError, ValueError) as err:
-        print(f'Could not read the link check history from {path} ({err}), '
-              f'starting a new one')
-        return {}
+        return {}, f'it could not be parsed ({err})'
     if isinstance(data, dict) and isinstance(data.get('links'), dict):
         data = data['links']
     if not isinstance(data, dict):
-        print(f'The link check history in {path} is not a JSON object, '
-              f'starting a new one')
-        return {}
+        return {}, 'it is not a JSON object'
     return {url: record for url, record in data.items()
-            if isinstance(url, str) and isinstance(record, dict)}
+            if isinstance(url, str) and isinstance(record, dict)}, None
 
 
 def ordered(record):
@@ -153,8 +152,17 @@ def merge(history, results, checked_at, retention_days):
     timestamp = format_time(checked_at)
     for url, result in sorted(results.items()):
         record = merged.setdefault(url, {})
-        record['last_seen'] = timestamp
+        last_seen = parse_time(record.get('last_seen'))
+        if last_seen is None or last_seen < checked_at:
+            record['last_seen'] = timestamp
         if not result.get('checked'):
+            continue
+        # A push that collided with a concurrent run is retried by merging
+        # this run into what the other run wrote. If that run checked the
+        # link more recently, its result stands, so that an older pass does
+        # not clear a newer failure and the times never move backwards.
+        last_checked = parse_time(record.get('last_checked'))
+        if last_checked is not None and last_checked > checked_at:
             continue
         record['last_checked'] = timestamp
         if result.get('ok'):
@@ -228,7 +236,11 @@ def main():
                                    'no longer in the documentation')
     args = parser.parse_args()
 
-    history = load_history(args.history)
+    history, problem = load_history(args.history)
+    if problem:
+        print(f'The link check history in {args.history} was replaced because '
+              f'{problem}. The damaged file is still in the history '
+              f'branch\'s log.')
     checked_at, results = load_results(args.results)
     merged = merge(history, results, checked_at, args.retention)
     save_history(args.output, merged)
