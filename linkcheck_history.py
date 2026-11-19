@@ -132,6 +132,18 @@ def save_results(path, checked_at, results):
         file_handle.write('\n')
 
 
+def last_written(history):
+    """Return the newest last_checked time in the history, or None.
+
+    This is when the history was last written by a run that checked links,
+    which says how far its records can be trusted.
+    """
+    times = [parse_time(record.get('last_checked'))
+             for record in history.values()]
+    times = [value for value in times if value is not None]
+    return max(times) if times else None
+
+
 def keep(record, cutoff):
     """Return True for a record of a URL seen since the retention cutoff."""
     seen = (parse_time(record.get('last_seen'))

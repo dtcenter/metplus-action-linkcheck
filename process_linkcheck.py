@@ -31,12 +31,13 @@ import posixpath
 import re
 import sys
 import time
+from datetime import timedelta
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import requests
 
-from linkcheck_history import (evaluate, load_history, merge as merge_history,
-                               now_utc, save_results)
+from linkcheck_history import (evaluate, last_written, load_history,
+                               merge as merge_history, now_utc, save_results)
 
 PERMANENT = 'permanent'
 TRANSIENT = 'transient'
@@ -573,22 +574,24 @@ def set_output(name, value):
         print(f'{name}={value}')
 
 
-def input_int(name):
+def input_int(name, allow_negative=False):
     """Return an argparse type for a whole-number action input.
 
     A bad value would otherwise stop the step with only a usage message, so
-    it is reported as an error annotation that names the input.
+    it is reported as an error annotation that names the input. Negative
+    values are rejected unless allow_negative is set.
     """
     def parse(value):
         try:
             number = int(value)
         except ValueError:
-            number = -1
-        if number < 0:
-            annotate('error', f'The {name} input must be a whole number of 0 '
-                              f'or more, not "{value}"')
-            raise argparse.ArgumentTypeError(
-                f'{name} must be a whole number of 0 or more')
+            number = None
+        if number is None or (number < 0 and not allow_negative):
+            requirement = ('a whole number' if allow_negative
+                           else 'a whole number of 0 or more')
+            annotate('error', f'The {name} input must be {requirement}, '
+                              f'not "{value}"')
+            raise argparse.ArgumentTypeError(f'{name} must be {requirement}')
         return number
     return parse
 
@@ -599,7 +602,9 @@ def main():
                         help='path to the linkcheck output.json file')
     parser.add_argument('--docs-path', default='docs',
                         help='docs directory, used to build file paths')
-    parser.add_argument('--recheck-attempts', type=input_int('recheck-attempts'),
+    # a negative number of re-checks means none, as it did in v1.6.0
+    parser.add_argument('--recheck-attempts',
+                        type=input_int('recheck-attempts', allow_negative=True),
                         default=2)
     parser.add_argument('--recheck-delay', type=input_int('recheck-delay'),
                         default=15)
@@ -655,12 +660,15 @@ def main():
     checked_at = now_utc()
     history_branch = args.history_branch or 'link check history'
 
-    # The grace period applies only once there is a history to decide from.
-    # Until a run has written one, and in workflows that never write it (ones
-    # that run only on pull requests, or lack "contents: write"), transient
-    # failures are decided from this run alone, as they were in v1.6.0, so
-    # that turning the history on can never stop a persistent failure from
-    # failing the job.
+    # The grace period applies only while there is a current history to decide
+    # from. Until a run has written one, in workflows that never write it (ones
+    # that run only on pull requests, or lack "contents: write"), and once the
+    # runs that write it have stopped for longer than the grace period,
+    # transient failures are decided from this run alone, as they were in
+    # v1.6.0, so that turning the history on can never stop a persistent
+    # failure from failing the job. A run that only reads a stale history
+    # merges its failures into a copy that is never saved, so every link that
+    # started failing since the last write would look new on every run.
     history_records = {}
     has_history = False
     if use_history:
@@ -675,6 +683,23 @@ def main():
                      f'run that writes the history replaces the file; the '
                      f'damaged copy is kept{where}.')
         has_history = not problem and os.path.exists(args.history_file)
+        if has_history:
+            written = last_written(history_records)
+            # at least a day, so that a grace period of 0 does not find
+            # every history stale by a few seconds
+            stale_days = max(args.grace_period, 1)
+            if written is None:
+                has_history = False
+            elif checked_at - written > timedelta(days=stale_days):
+                has_history = False
+                annotate('warning',
+                         f'The link check history on branch {history_branch} '
+                         f'was last written on {written:%Y-%m-%d}, '
+                         f'more than {days_text(stale_days)} ago, so '
+                         f'transient failures are decided from this run '
+                         f'alone. Check that the runs that write it are '
+                         f'still running and have "permissions: contents: '
+                         f'write".')
     doctree_dir = args.doctree_dir or os.path.join(
         os.path.dirname(args.output_json), '.doctrees')
     rtd_base = get_rtd_base(args.rtd_url, args.branch)

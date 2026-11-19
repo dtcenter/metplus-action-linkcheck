@@ -117,7 +117,21 @@ Links that Sphinx does not check (for example, those matching `linkcheck_ignore`
 
 Re-checks ride out an outage that lasts seconds. They do nothing for a site with an expired certificate, a host under maintenance, or a server throttling the runner for an afternoon, which last hours or days. Without a memory of earlier runs, a link that has worked every day for a year and failed once this morning is treated exactly like a link that has been dead since March, and every pull request opened in the meantime fails for a reason that has nothing to do with the pull request.
 
-This action keeps a history of every `http` and `https` link it checks in a single JSON file on an orphan branch of the repository being checked, the way `gh-pages` holds built documentation. The branch holds that one file and nothing else, and never appears in the history of the branches being built. The history lives in the repository being checked, not in this action's repository, since each component checks its own set of links.
+This action keeps a history of every `http` and `https` link it checks in a single JSON file on an orphan branch of the repository being checked, the way `gh-pages` holds built documentation. The branch holds history files and nothing else, and never appears in the history of the branches being built. The history lives in the repository being checked, not in this action's repository, since each component checks its own set of links.
+
+### Setting up the history
+
+The history is on by default, but it only helps once something writes it regularly. Without the first two steps, the action behaves as v1.6.0 did and there is no grace period; the third confirms they worked.
+
+1. **Grant `permissions: contents: write`** in the calling workflow. Every run that is not a pull request (a push, a scheduled run, or a manual `workflow_dispatch` run) writes the history, and the push to the history branch is rejected without this permission. Pull request runs only read it.
+2. **Add a `schedule` trigger that runs more often than `grace-period` days.** Daily is a good choice; weekly works with the default 14-day grace period but leaves room for only one missed run. A workflow that runs only when the documentation changes writes the history only then, and once the history goes unwritten for longer than `grace-period` days, every run ignores it and falls back to v1.6.0 behavior. Two GitHub rules to keep in mind:
+   * Scheduled workflows run only from the repository's default branch (`develop` for MET and METplus), so the `schedule` trigger does nothing until it is merged there.
+   * GitHub disables scheduled workflows in public repositories after 60 days without repository activity. Re-enable the workflow from the Actions tab when that happens. The action warns when the history it reads has gone stale.
+3. **Check the first scheduled or push run.** The log of its "Update link check history" step should report `Updated linkcheck-history.json on branch linkcheck-history`, and that branch should appear in the repository. A warning there instead names what went wrong.
+
+See the [Link Check History example](#link-check-history-1) for a complete workflow.
+
+### History file format
 
 One record per URL:
 
@@ -146,7 +160,7 @@ One record per URL:
 | **Transient** (connection errors, timeouts, 429, 5xx, TLS failures), failing since before the grace period, seen failing at least `min-failures` times | Fails the job |
 | **Transient**, failing for less than `grace-period` days | Reported as a warning, with the date it last passed and the date it starts failing the job |
 | **Transient**, with no record in an existing history | Reported as a warning, labeled as seen for the first time, and the grace period takes over from the next run |
-| **Transient**, with no usable history at all (the branch or file does not exist yet, or the file is damaged) | Fails the job, as in v1.6.0 |
+| **Transient**, with no usable history at all (the branch or file does not exist yet, the file is damaged, or the history has not been written for longer than the grace period) | Fails the job, as in v1.6.0 |
 
 A new link that fails transiently is awkward: it could be a typo in a hostname or a healthy site having a bad hour, and there is no history to tell them apart. It is reported as a warning rather than failing a pull request for the links a reviewer is already looking at. A mistyped host name usually fails as `Name or service not known`, which is a permanent failure and fails the job however new the link is.
 
@@ -160,15 +174,16 @@ Setting `grace-period` to `0` and `min-failures` to `1` restores the behavior of
 
 The writing runs need `permissions: contents: write` in the calling workflow. Without it the push is rejected, which is reported as a warning and does not fail the job.
 
-Until the branch holds the history file, there is nothing to measure a grace period against, so each run decides from its own results as v1.6.0 did: a TLS failure is permanent, and a link still unreachable after its re-checks fails the job. The same applies to a workflow that never manages to write the history, because it runs only on pull requests or lacks `contents: write`, so turning the history on can never stop a persistent failure from failing the job. Such a workflow simply gets no grace period. After adding this action to a workflow, check the log of the first push or scheduled run for the warning above, and confirm that the history branch was created.
+Until the branch holds the history file, there is nothing to measure a grace period against, so each run decides from its own results as v1.6.0 did: a TLS failure is permanent, and a link still unreachable after its re-checks fails the job. The same applies to a workflow that never manages to write the history, because it runs only on pull requests or lacks `contents: write`. Such a workflow simply gets no grace period.
+
+The same applies again once the history goes stale: when its newest `last_checked` is more than `grace-period` days old (at least one day), the run warns that the history is out of date and decides from its own results. This catches a history that was written for a while and then stopped, because GitHub disabled an idle scheduled workflow or `contents: write` was removed. Without it, every run would merge its failures into a copy that is never saved, and a link that started failing after the last write would look new on every run and never fail the job. Together these mean that turning the history on can never stop a persistent failure from failing the job. A workflow that writes the history only when the documentation changes, with no `schedule` trigger, falls back the same way whenever the documentation goes unchanged for longer than the grace period.
 
 A history file that cannot be parsed is reported with a warning annotation naming the commit that holds it, and that run decides from its own results. The next run that writes the history replaces the file with one built from its own results; the damaged copy stays in the branch's log, where it can be recovered with `git show <commit>:<history-file>`.
 
-Three cautions when choosing `history-branch`:
+Two cautions when choosing `history-branch`:
 
 * **The branch name must not match the `push` branch patterns of the calling workflow.** MET's `documentation.yml` triggers on `feature_*`, `main_*`, and `bugfix_*`, so a history branch named for any of those patterns would start another run every time the history is written.
 * **Give each workflow its own `history-file` if several share the branch.** Each push replaces only its own file and leaves the others alone.
-* **Add a `schedule` trigger.** A workflow that only runs on pushes that touch `docs/**` refreshes the history only when the documentation changes, leaving `first_failure` dates weeks apart. A scheduled run also reports a link that has gone dead on its own, instead of waiting for whoever opens the next pull request to find it.
 
 The history is written after the links are checked, so a failing job still records the run that made it fail. The commit is built with git plumbing commands and pushed straight from the object database, so writing it never touches the working tree, the index, or the branch being built. Concurrent runs collide on the branch: a rejected push is retried by fetching the branch again, merging this run's results into what the other run wrote, and pushing again, up to three times. A link the other run checked more recently keeps that run's result, so an older pass never clears a newer failure.
 
@@ -230,6 +245,8 @@ This example shows the minimum configuration, assuming your documentation is in 
   uses: dtcenter/metplus-action-linkcheck@v1
 ```
 
+This checks the links, but gets no grace period for transient failures until the history is [set up](#setting-up-the-history) with `contents: write` and a `schedule` trigger.
+
 ### Read the Docs URLs for Relative Links
 
 This example shows broken relative links with their Read the Docs URL for the current branch:
@@ -243,7 +260,7 @@ This example shows broken relative links with their Read the Docs URL for the cu
 
 ### Link Check History
 
-The [link check history](#link-check-history) is enabled by default. The runs that write it need `contents: write`, and a `schedule` trigger keeps the history fresh even when the documentation does not change:
+The [link check history](#link-check-history) is enabled by default. This workflow [sets it up](#setting-up-the-history): the runs that write it have `contents: write`, and the daily `schedule` trigger keeps the history fresh even when the documentation does not change:
 
 ```yaml
 name: Documentation
@@ -255,7 +272,7 @@ on:
   pull_request:
     paths: ['docs/**']
   schedule:
-    - cron: '17 6 * * 1'
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
